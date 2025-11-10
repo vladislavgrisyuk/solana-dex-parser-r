@@ -134,79 +134,66 @@ impl DexParser {
         tracing::info!("📝 try_parse START: signature={}", tx.signature);
         
         let t0 = std::time::Instant::now();
-        let adapter = TransactionAdapter::new(tx.clone(), config.clone());
+        let adapter = TransactionAdapter::new(tx, config.clone());
         let t1 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  try_parse: TransactionAdapter::new={:.3}ms",
-            (t1 - t0).as_secs_f64() * 1000.0
-        );
+        let adapter_time = (t1 - t0).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [1/8] TransactionAdapter::new={:.3}ms", adapter_time);
         
         let t2 = std::time::Instant::now();
-        let utils = TransactionUtils::new(adapter.clone());
+        let utils = TransactionUtils::new(adapter);
         let t3 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  try_parse: TransactionUtils::new={:.3}ms",
-            (t3 - t2).as_secs_f64() * 1000.0
-        );
+        let utils_time = (t3 - t2).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [2/8] TransactionUtils::new={:.3}ms", utils_time);
         
         let t4 = std::time::Instant::now();
-        let classifier = InstructionClassifier::new(&adapter);
+        let classifier = InstructionClassifier::new(&utils.adapter);
         let t5 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  try_parse: InstructionClassifier::new={:.3}ms",
-            (t5 - t4).as_secs_f64() * 1000.0
-        );
+        let classifier_time = (t5 - t4).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [3/8] InstructionClassifier::new={:.3}ms", classifier_time);
         
         let t6 = std::time::Instant::now();
         let dex_info = utils.get_dex_info(&classifier);
         let t7 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  try_parse: utils.get_dex_info={:.3}ms, program_id={:?}, amm={:?}",
-            (t7 - t6).as_secs_f64() * 1000.0,
-            dex_info.program_id,
-            dex_info.amm
-        );
+        let dex_info_time = (t7 - t6).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [4/8] utils.get_dex_info={:.3}ms, program_id={:?}, amm={:?}", 
+            dex_info_time, dex_info.program_id, dex_info.amm);
         
         let t8 = std::time::Instant::now();
         let transfer_actions = utils.get_transfer_actions();
         let t9 = std::time::Instant::now();
         let transfer_count: usize = transfer_actions.values().map(|v| v.len()).sum();
-        tracing::debug!(
-            "⏱️  try_parse: utils.get_transfer_actions={:.3}ms, total_transfers={}, programs={}",
-            (t9 - t8).as_secs_f64() * 1000.0,
-            transfer_count,
-            transfer_actions.len()
-        );
+        let transfer_actions_time = (t9 - t8).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [5/8] utils.get_transfer_actions={:.3}ms, total_transfers={}, programs={}",
+            transfer_actions_time, transfer_count, transfer_actions.len());
         
         let t10 = std::time::Instant::now();
         let all_program_ids = classifier.get_all_program_ids();
         let t11 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  try_parse: classifier.get_all_program_ids={:.3}ms, count={}",
-            (t11 - t10).as_secs_f64() * 1000.0,
-            all_program_ids.len()
-        );
-        tracing::info!(
-            "DexParser: found {} program IDs to process: {:?}",
-            all_program_ids.len(),
-            all_program_ids
-        );
+        let get_program_ids_time = (t11 - t10).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [6/8] classifier.get_all_program_ids={:.3}ms, count={}",
+            get_program_ids_time, all_program_ids.len());
+        tracing::info!("DexParser: found {} program IDs to process: {:?}",
+            all_program_ids.len(), all_program_ids);
 
+        let t12 = std::time::Instant::now();
         let mut result = ParseResult::new();
-        result.slot = adapter.slot();
-        result.timestamp = adapter.block_time();
-        result.signature = adapter.signature().to_string();
-        result.signer = adapter.signers().to_vec();
-        result.compute_units = adapter.compute_units();
-        result.tx_status = adapter.tx_status();
-        result.fee = adapter.fee();
+        result.slot = utils.adapter.slot();
+        result.timestamp = utils.adapter.block_time();
+        result.signature = utils.adapter.signature().to_string();
+        result.signer = utils.adapter.signers().to_vec();
+        result.compute_units = utils.adapter.compute_units();
+        result.tx_status = utils.adapter.tx_status();
+        result.fee = utils.adapter.fee();
 
-        if let Some(change) = adapter.signer_sol_balance_change() {
+        if let Some(change) = utils.adapter.signer_sol_balance_change() {
             result.sol_balance_change = Some(change);
         }
-        if let Some(token_change) = adapter.signer_token_balance_changes() {
+        if let Some(token_change) = utils.adapter.signer_token_balance_changes() {
             result.token_balance_change = token_change.clone();
         }
+        let t13 = std::time::Instant::now();
+        let init_result_time = (t13 - t12).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [7/8] Initialize ParseResult={:.3}ms", init_result_time);
 
         if let Some(program_filter) = config.program_ids.as_ref() {
             if !program_filter.iter().any(|id| all_program_ids.contains(id)) {
@@ -252,11 +239,11 @@ impl DexParser {
                     let trade_start = std::time::Instant::now();
                     
                     let t2 = std::time::Instant::now();
-                    let mut program_info = dex_info.clone();
-                    program_info.program_id = Some(program_id.clone());
-                    if program_info.amm.is_none() {
-                        program_info.amm = Some(dex_program_names::name(program_id).to_string());
-                    }
+                    let mut program_info = DexInfo {
+                        program_id: Some(program_id.clone()),
+                        amm: dex_info.amm.clone().or_else(|| Some(dex_program_names::name(program_id).to_string())),
+                        route: None,
+                    };
                     let t3 = std::time::Instant::now();
                     tracing::debug!(
                         "⏱️  [{}/{}] prepare_program_info({})={:.3}μs",
@@ -268,10 +255,10 @@ impl DexParser {
                     
                     let t4 = std::time::Instant::now();
                     let mut parser = builder(
-                        adapter.clone(),
+                        utils.adapter.clone(),
                         program_info,
                         transfer_actions.clone(),
-                        classified_instructions.clone(),
+                        classified_instructions,
                     );
                     let t5 = std::time::Instant::now();
                     tracing::debug!(
@@ -283,23 +270,27 @@ impl DexParser {
                     );
                     
                     let t6 = std::time::Instant::now();
+                    tracing::info!("🔹 [{}/{}] Calling process_trades() for program: {}", idx + 1, all_program_ids.len(), program_id);
                     let trades = parser.process_trades();
                     let t7 = std::time::Instant::now();
                     let trade_duration = trade_start.elapsed();
-                    tracing::debug!(
+                    let process_trades_time = (t7 - t6).as_secs_f64() * 1000.0;
+                    tracing::info!(
                         "⏱️  [{}/{}] parser.process_trades({})={:.3}ms, found {} trades",
                         idx + 1,
                         all_program_ids.len(),
                         program_id,
-                        (t7 - t6).as_secs_f64() * 1000.0,
+                        process_trades_time,
                         trades.len()
                     );
                     tracing::info!(
-                        "✅ [{}/{}] Parsed {} trades for program {} (total={:.3}ms)",
+                        "✅ [{}/{}] Parsed {} trades for program {} (builder={:.3}ms, process_trades={:.3}ms, total={:.3}ms)",
                         idx + 1,
                         all_program_ids.len(),
                         trades.len(),
                         program_id,
+                        (t5 - t4).as_secs_f64() * 1000.0,
+                        process_trades_time,
                         trade_duration.as_secs_f64() * 1000.0
                     );
                     result.trades.extend(trades);
@@ -311,7 +302,7 @@ impl DexParser {
                         let t0 = std::time::Instant::now();
                         let has_supported = transfers
                             .iter()
-                            .any(|transfer| adapter.is_supported_token(&transfer.info.mint));
+                            .any(|transfer| utils.adapter.is_supported_token(&transfer.info.mint));
                         let t1 = std::time::Instant::now();
                         tracing::debug!(
                             "⏱️  [{}/{}] check_supported_token({})={:.3}μs, has_supported={}",
@@ -324,12 +315,11 @@ impl DexParser {
                         
                         if transfers.len() >= 2 && has_supported {
                             let t2 = std::time::Instant::now();
-                            let mut program_info = dex_info.clone();
-                            program_info.program_id = Some(program_id.clone());
-                            if program_info.amm.is_none() {
-                                program_info.amm =
-                                    Some(dex_program_names::name(program_id).to_string());
-                            }
+                            let program_info = DexInfo {
+                                program_id: Some(program_id.clone()),
+                                amm: dex_info.amm.clone().or_else(|| Some(dex_program_names::name(program_id).to_string())),
+                                route: None,
+                            };
                             let t3 = std::time::Instant::now();
                             tracing::debug!(
                                 "⏱️  [{}/{}] prepare_program_info_unknown({})={:.3}μs",
@@ -429,7 +419,7 @@ impl DexParser {
                     
                     let t2 = std::time::Instant::now();
                     let mut parser = builder(
-                        adapter.clone(),
+                        utils.adapter.clone(),
                         transfer_actions.clone(),
                         classified_instructions,
                     );
@@ -443,14 +433,16 @@ impl DexParser {
                     );
                     
                     let t4 = std::time::Instant::now();
+                    tracing::info!("🔹 [{}/{}] Calling process_liquidity() for program: {}", idx + 1, all_program_ids.len(), program_id);
                     let liquidities = parser.process_liquidity();
                     let t5 = std::time::Instant::now();
-                    tracing::debug!(
+                    let process_liquidity_time = (t5 - t4).as_secs_f64() * 1000.0;
+                    tracing::info!(
                         "⏱️  [{}/{}] parser.process_liquidity({})={:.3}ms, found {} events",
                         idx + 1,
                         all_program_ids.len(),
                         program_id,
-                        (t5 - t4).as_secs_f64() * 1000.0,
+                        process_liquidity_time,
                         liquidities.len()
                     );
                     result.liquidities.extend(liquidities);
@@ -498,7 +490,7 @@ impl DexParser {
                     tracing::info!("🔧 Using meme parser for program: {}", program_id);
                     
                     let t0 = std::time::Instant::now();
-                    let mut parser = builder(adapter.clone(), transfer_actions.clone());
+                    let mut parser = builder(utils.adapter.clone(), transfer_actions.clone());
                     let t1 = std::time::Instant::now();
                     tracing::debug!(
                         "⏱️  [{}/{}] meme_builder({})={:.3}μs",
@@ -562,9 +554,14 @@ impl DexParser {
                     );
                     
                     let t2 = std::time::Instant::now();
+                    let mut program_info = DexInfo {
+                        program_id: dex_info.program_id.clone(),
+                        amm: dex_info.amm.clone(),
+                        route: None,
+                    };
                     let mut parser = builder(
-                        adapter.clone(),
-                        dex_info.clone(),
+                        utils.adapter.clone(),
+                        program_info,
                         transfer_actions.clone(),
                         classified_instructions,
                     );
@@ -608,51 +605,44 @@ impl DexParser {
             );
         }
 
+        let t14 = std::time::Instant::now();
         if !result.trades.is_empty() {
             let postprocess_start = std::time::Instant::now();
             tracing::info!("🔧 Post-processing {} trades", result.trades.len());
             
             let t0 = std::time::Instant::now();
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::with_capacity(result.trades.len());
             let before_dedup = result.trades.len();
             result
                 .trades
                 .retain(|trade| seen.insert((trade.signature.clone(), trade.idx.clone())));
             let after_dedup = result.trades.len();
             let t1 = std::time::Instant::now();
-            tracing::debug!(
-                "⏱️  deduplicate_trades={:.3}μs, before={}, after={}, removed={}",
-                (t1 - t0).as_secs_f64() * 1_000_000.0,
-                before_dedup,
-                after_dedup,
-                before_dedup - after_dedup
+            let dedup_time = (t1 - t0).as_secs_f64() * 1000.0;
+            tracing::info!(
+                "⏱️  deduplicate_trades={:.3}ms, before={}, after={}, removed={}",
+                dedup_time, before_dedup, after_dedup, before_dedup - after_dedup
             );
             
             let t2 = std::time::Instant::now();
             result.trades.sort_by(|a, b| a.idx.cmp(&b.idx));
             let t3 = std::time::Instant::now();
-            tracing::debug!(
-                "⏱️  sort_trades={:.3}μs",
-                (t3 - t2).as_secs_f64() * 1_000_000.0
-            );
+            let sort_time = (t3 - t2).as_secs_f64() * 1000.0;
+            tracing::info!("⏱️  sort_trades={:.3}ms", sort_time);
             
-            if adapter.config().aggregate_trades {
+            if utils.adapter.config().aggregate_trades {
                 let t4 = std::time::Instant::now();
                 if let Some(last_trade) = result.trades.last().cloned() {
                     let t5 = std::time::Instant::now();
                     let trade_with_fee = utils.attach_trade_fee(last_trade);
                     let t6 = std::time::Instant::now();
-                    tracing::debug!(
-                        "⏱️  attach_trade_fee={:.3}μs",
-                        (t6 - t5).as_secs_f64() * 1_000_000.0
-                    );
+                    let attach_fee_time = (t6 - t5).as_secs_f64() * 1000.0;
+                    tracing::info!("⏱️  attach_trade_fee={:.3}ms", attach_fee_time);
                     result.aggregate_trade = Some(trade_with_fee);
                 }
                 let t7 = std::time::Instant::now();
-                tracing::debug!(
-                    "⏱️  aggregate_trades_total={:.3}μs",
-                    (t7 - t4).as_secs_f64() * 1_000_000.0
-                );
+                let aggregate_time = (t7 - t4).as_secs_f64() * 1000.0;
+                tracing::info!("⏱️  aggregate_trades_total={:.3}ms", aggregate_time);
             }
             
             let postprocess_duration = postprocess_start.elapsed();
@@ -661,11 +651,16 @@ impl DexParser {
                 postprocess_duration.as_secs_f64() * 1000.0
             );
         }
+        let t15 = std::time::Instant::now();
+        let postprocess_time = (t15 - t14).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [8/8] Post-processing={:.3}ms", postprocess_time);
 
         let method_duration = method_start.elapsed();
+        let total_time = method_duration.as_secs_f64() * 1000.0;
         tracing::info!(
-            "✅ try_parse END: total={:.3}ms, trades={}, liquidities={}, transfers={}, meme_events={}, state={}",
-            method_duration.as_secs_f64() * 1000.0,
+            "✅ try_parse END: total={:.3}ms (adapter={:.3}ms, utils={:.3}ms, classifier={:.3}ms, dex_info={:.3}ms, transfers={:.3}ms, program_ids={:.3}ms, init={:.3}ms, postprocess={:.3}ms), trades={}, liquidities={}, transfers={}, meme_events={}, state={}",
+            total_time,
+            adapter_time, utils_time, classifier_time, dex_info_time, transfer_actions_time, get_program_ids_time, init_result_time, postprocess_time,
             result.trades.len(),
             result.liquidities.len(),
             result.transfers.len(),
@@ -704,7 +699,8 @@ impl DexParser {
         );
         
         let t2 = std::time::Instant::now();
-        let result = match self.try_parse(tx, config.clone(), parse_type) {
+        let config_clone = config.clone();
+        let result = match self.try_parse(tx, config_clone, parse_type) {
             Ok(result) => {
                 let t3 = std::time::Instant::now();
                 tracing::debug!(

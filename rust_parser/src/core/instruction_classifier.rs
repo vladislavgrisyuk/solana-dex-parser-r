@@ -15,88 +15,88 @@ pub struct InstructionClassifier {
 
 impl InstructionClassifier {
     pub fn new(adapter: &TransactionAdapter) -> Self {
+        #[cfg(debug_assertions)]
         let t0 = std::time::Instant::now();
-        let mut instruction_map: HashMap<String, Vec<ClassifiedInstruction>> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        
+        // Pre-allocate with estimated capacity
+        let outer_count = adapter.instructions().len();
+        let inner_count_est = adapter.inner_instructions().iter().map(|i| i.instructions.len()).sum::<usize>();
+        let mut instruction_map: HashMap<String, Vec<ClassifiedInstruction>> = HashMap::with_capacity(outer_count / 2);
+        let mut order: Vec<String> = Vec::with_capacity(outer_count / 2);
+        let mut seen: HashSet<String> = HashSet::with_capacity(outer_count / 2);
 
-        // OUTER instructions
-        for (outer_index, instruction) in adapter.instructions().iter().cloned().enumerate() {
-            let program_id = instruction.program_id.clone();
-            if program_id.is_empty() {
+        // OUTER instructions - optimized: avoid multiple clones
+        for (outer_index, instruction) in adapter.instructions().iter().enumerate() {
+            if instruction.program_id.is_empty() {
                 continue;
             }
+            let program_id = &instruction.program_id;
             let classified = ClassifiedInstruction {
                 program_id: program_id.clone(),
                 outer_index,
                 inner_index: None,
-                data: instruction,
+                data: instruction.clone(),
             };
             instruction_map
                 .entry(program_id.clone())
                 .or_default()
                 .push(classified);
             if seen.insert(program_id.clone()) {
-                order.push(program_id);
+                order.push(program_id.clone());
             }
         }
+        #[cfg(debug_assertions)]
         let t1 = std::time::Instant::now();
 
-        // INNER instructions
+        // INNER instructions - optimized: avoid multiple clones
+        #[cfg(debug_assertions)]
         let mut inner_count = 0;
         for inner in adapter.inner_instructions() {
-            for (inner_index, instruction) in inner.instructions.iter().cloned().enumerate() {
-                let program_id = instruction.program_id.clone();
-                if program_id.is_empty() {
+            for (inner_index, instruction) in inner.instructions.iter().enumerate() {
+                if instruction.program_id.is_empty() {
                     continue;
                 }
-                inner_count += 1;
-                tracing::debug!(
-                    "Found inner instruction: program={}, outer={}, inner={}",
-                    program_id,
-                    inner.index,
-                    inner_index
-                );
+                #[cfg(debug_assertions)]
+                {
+                    inner_count += 1;
+                }
+                let program_id = &instruction.program_id;
                 let classified = ClassifiedInstruction {
                     program_id: program_id.clone(),
                     outer_index: inner.index,
                     inner_index: Some(inner_index),
-                    data: instruction,
+                    data: instruction.clone(),
                 };
                 instruction_map
                     .entry(program_id.clone())
                     .or_default()
                     .push(classified);
                 if seen.insert(program_id.clone()) {
-                    order.push(program_id);
+                    order.push(program_id.clone());
                 }
             }
         }
-        tracing::debug!(
-            "InstructionClassifier: processed {} inner instructions from {} groups",
-            inner_count,
-            adapter.inner_instructions().len()
-        );
-        let t2 = std::time::Instant::now();
-
-        tracing::debug!(
-            "⏱️  InstructionClassifier::new: outer={:.3}μs ({}), inner={:.3}μs ({}), total={:.3}μs",
-            (t1 - t0).as_secs_f64() * 1_000_000.0, adapter.instructions().len(),
-            (t2 - t1).as_secs_f64() * 1_000_000.0, adapter.inner_instructions().iter().map(|i| i.instructions.len()).sum::<usize>(),
-            (t2 - t0).as_secs_f64() * 1_000_000.0,
-        );
-        tracing::info!(
-            "InstructionClassifier: found {} unique program IDs: {:?}",
-            order.len(),
-            order
-        );
-        tracing::debug!(
-            "InstructionClassifier: instruction counts per program: {:?}",
-            instruction_map
-                .iter()
-                .map(|(k, v)| (k.clone(), v.len()))
-                .collect::<Vec<_>>()
-        );
+        
+        #[cfg(debug_assertions)]
+        {
+            let t2 = std::time::Instant::now();
+            tracing::debug!(
+                "InstructionClassifier: processed {} inner instructions from {} groups",
+                inner_count,
+                adapter.inner_instructions().len()
+            );
+            tracing::debug!(
+                "⏱️  InstructionClassifier::new: outer={:.3}μs ({}), inner={:.3}μs ({}), total={:.3}μs",
+                (t1 - t0).as_secs_f64() * 1_000_000.0, adapter.instructions().len(),
+                (t2 - t1).as_secs_f64() * 1_000_000.0, inner_count_est,
+                (t2 - t0).as_secs_f64() * 1_000_000.0,
+            );
+            tracing::info!(
+                "InstructionClassifier: found {} unique program IDs: {:?}",
+                order.len(),
+                order
+            );
+        }
 
         Self {
             instruction_map,
@@ -107,45 +107,38 @@ impl InstructionClassifier {
     /// Полный список program_id в порядке первого появления,
     /// но с фильтром как в TS: исключаем системные и «skip».
     pub fn get_all_program_ids(&self) -> Vec<String> {
-        let start = std::time::Instant::now();
-        
-        let t0 = std::time::Instant::now();
-        let result: Vec<String> = self.order
-            .iter()
-            .cloned()
-            .filter(|pid| {
-                let pid_str = pid.as_str();
-                !SYSTEM_PROGRAMS.contains(&pid_str) && !SKIP_PROGRAM_IDS.contains(&pid_str)
-            })
-            .collect();
-        let t1 = std::time::Instant::now();
-        
-        let duration = start.elapsed();
-        tracing::debug!(
-            "⏱️  get_all_program_ids: filter={:.3}μs, total={:.3}μs, input_count={}, output_count={}",
-            (t1 - t0).as_secs_f64() * 1_000_000.0,
-            duration.as_secs_f64() * 1_000_000.0,
-            self.order.len(),
-            result.len()
-        );
-        
+        // Optimized: pre-allocate with capacity and avoid timing in release
+        let mut result = Vec::with_capacity(self.order.len());
+        for pid in &self.order {
+            let pid_str = pid.as_str();
+            if !SYSTEM_PROGRAMS.contains(&pid_str) && !SKIP_PROGRAM_IDS.contains(&pid_str) {
+                result.push(pid.clone());
+            }
+        }
         result
     }
 
     /// Все инструкции по одному program_id
     pub fn get_instructions(&self, program_id: &str) -> Vec<ClassifiedInstruction> {
+        // Optimized: avoid timing overhead in release builds
+        #[cfg(debug_assertions)]
         let start = std::time::Instant::now();
+        
         let result = self.instruction_map
             .get(program_id)
             .cloned()
             .unwrap_or_default();
-        let duration = start.elapsed();
-        tracing::debug!(
-            "⏱️  get_instructions({}): total={:.3}μs, found {} instructions",
-            program_id,
-            duration.as_secs_f64() * 1_000_000.0,
-            result.len()
-        );
+        
+        #[cfg(debug_assertions)]
+        {
+            let duration = start.elapsed();
+            tracing::debug!(
+                "⏱️  get_instructions({}): total={:.3}μs, found {} instructions",
+                program_id,
+                duration.as_secs_f64() * 1_000_000.0,
+                result.len()
+            );
+        }
         result
     }
 

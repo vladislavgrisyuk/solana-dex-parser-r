@@ -3,9 +3,8 @@ use crate::core::instruction_classifier::InstructionClassifier;
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::types::{DexInfo, FeeInfo, PoolEvent, TradeInfo, TradeType, TransferData, TransferMap};
 
-#[derive(Clone, Debug)]
 pub struct TransactionUtils {
-    adapter: TransactionAdapter,
+    pub(crate) adapter: TransactionAdapter,
 }
 
 impl TransactionUtils {

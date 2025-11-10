@@ -243,110 +243,78 @@ impl LiquidityParser for PumpswapLiquidityParser {
         let parsed_events = self.parse_events();
         let t1 = std::time::Instant::now();
         let events_count = parsed_events.len();
-        tracing::debug!(
-            "⏱️  PumpswapLiquidityParser::process_liquidity: parse_events={:.3}ms, events_count={}",
-            (t1 - t0).as_secs_f64() * 1000.0,
-            events_count
-        );
+        let parse_events_time = (t1 - t0).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [1/2] parse_events={:.3}ms, events_count={}", parse_events_time, events_count);
         
         let t2 = std::time::Instant::now();
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(events_count);
         let mut create_count = 0;
         let mut deposit_count = 0;
         let mut withdraw_count = 0;
         let mut skipped_count = 0;
+        let mut create_time = 0.0;
+        let mut deposit_time = 0.0;
+        let mut withdraw_time = 0.0;
         
         for (idx, event) in parsed_events.into_iter().enumerate() {
             let event_start = std::time::Instant::now();
             
             match &event.data {
                 PumpswapEventData::Create(data) => {
-                    let t0 = std::time::Instant::now();
+                    let t_create = std::time::Instant::now();
                     let pool_event = self.parse_create_event(&event, data);
-                    let t1 = std::time::Instant::now();
-                    tracing::debug!(
-                        "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] parse_create_event={:.3}μs",
-                        idx + 1,
-                        events_count,
-                        (t1 - t0).as_secs_f64() * 1_000_000.0
-                    );
+                    let create_duration = (std::time::Instant::now() - t_create).as_secs_f64() * 1000.0;
+                    create_time += create_duration;
                     events.push(pool_event);
                     create_count += 1;
+                    tracing::info!("⏱️  [{}/{}] parse_create_event={:.3}ms", idx + 1, events_count, create_duration);
                 }
                 PumpswapEventData::Deposit(data) => {
-                    let t0 = std::time::Instant::now();
+                    let t_deposit = std::time::Instant::now();
                     if let Some(pool) = self.parse_deposit_event(&event, data) {
-                        let t1 = std::time::Instant::now();
-                        tracing::debug!(
-                            "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] parse_deposit_event={:.3}μs",
-                            idx + 1,
-                            events_count,
-                            (t1 - t0).as_secs_f64() * 1_000_000.0
-                        );
+                        let deposit_duration = (std::time::Instant::now() - t_deposit).as_secs_f64() * 1000.0;
+                        deposit_time += deposit_duration;
                         events.push(pool);
                         deposit_count += 1;
+                        tracing::info!("⏱️  [{}/{}] parse_deposit_event={:.3}ms", idx + 1, events_count, deposit_duration);
                     } else {
-                        tracing::debug!(
-                            "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] parse_deposit_event returned None",
-                            idx + 1,
-                            events_count
-                        );
                         skipped_count += 1;
+                        tracing::debug!("⏱️  [{}/{}] parse_deposit_event returned None", idx + 1, events_count);
                     }
                 }
                 PumpswapEventData::Withdraw(data) => {
-                    let t0 = std::time::Instant::now();
+                    let t_withdraw = std::time::Instant::now();
                     if let Some(pool) = self.parse_withdraw_event(&event, data) {
-                        let t1 = std::time::Instant::now();
-                        tracing::debug!(
-                            "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] parse_withdraw_event={:.3}μs",
-                            idx + 1,
-                            events_count,
-                            (t1 - t0).as_secs_f64() * 1_000_000.0
-                        );
+                        let withdraw_duration = (std::time::Instant::now() - t_withdraw).as_secs_f64() * 1000.0;
+                        withdraw_time += withdraw_duration;
                         events.push(pool);
                         withdraw_count += 1;
+                        tracing::info!("⏱️  [{}/{}] parse_withdraw_event={:.3}ms", idx + 1, events_count, withdraw_duration);
                     } else {
-                        tracing::debug!(
-                            "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] parse_withdraw_event returned None",
-                            idx + 1,
-                            events_count
-                        );
                         skipped_count += 1;
+                        tracing::debug!("⏱️  [{}/{}] parse_withdraw_event returned None", idx + 1, events_count);
                     }
                 }
                 _ => {
-                    tracing::debug!(
-                        "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] skipped unknown event type",
-                        idx + 1,
-                        events_count
-                    );
                     skipped_count += 1;
+                    tracing::debug!("⏱️  [{}/{}] skipped unknown event type", idx + 1, events_count);
                 }
             }
             
-            let event_duration = event_start.elapsed();
-            tracing::debug!(
-                "⏱️  PumpswapLiquidityParser::process_liquidity: [{}/{}] process_event_total={:.3}μs",
-                idx + 1,
-                events_count,
-                event_duration.as_secs_f64() * 1_000_000.0
-            );
+            let event_duration = event_start.elapsed().as_secs_f64() * 1000.0;
+            tracing::debug!("⏱️  [{}/{}] process_event_total={:.3}ms", idx + 1, events_count, event_duration);
         }
         let t3 = std::time::Instant::now();
-        tracing::debug!(
-            "⏱️  PumpswapLiquidityParser::process_liquidity: process_all_events={:.3}ms, create={}, deposit={}, withdraw={}, skipped={}",
-            (t3 - t2).as_secs_f64() * 1000.0,
-            create_count,
-            deposit_count,
-            withdraw_count,
-            skipped_count
-        );
+        let process_events_time = (t3 - t2).as_secs_f64() * 1000.0;
+        tracing::info!("⏱️  [2/2] process_events={:.3}ms (create: {} processed, {:.3}ms total; deposit: {} processed, {:.3}ms total; withdraw: {} processed, {:.3}ms total; skipped: {})",
+            process_events_time, create_count, create_time, deposit_count, deposit_time, withdraw_count, withdraw_time, skipped_count);
         
-        let method_duration = method_start.elapsed();
+        let method_duration = method_start.elapsed().as_secs_f64() * 1000.0;
         tracing::info!(
-            "✅ PumpswapLiquidityParser::process_liquidity END: total={:.3}ms, events_parsed={}, pools_created={}, create={}, deposit={}, withdraw={}, skipped={}",
-            method_duration.as_secs_f64() * 1000.0,
+            "✅ PumpswapLiquidityParser::process_liquidity END: total={:.3}ms (parse_events={:.3}ms, process_events={:.3}ms), events_parsed={}, pools_created={}, create={}, deposit={}, withdraw={}, skipped={}",
+            method_duration,
+            parse_events_time,
+            process_events_time,
             events_count,
             events.len(),
             create_count,

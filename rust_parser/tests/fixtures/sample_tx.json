@@ -1,0 +1,70 @@
+{
+  "slot": 1,
+  "signature": "sample-signature",
+  "blockTime": 1234567,
+  "signers": ["user"],
+  "instructions": [
+    {
+      "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "accounts": ["BASE", "QUOTE"],
+      "data": "swap"
+    }
+  ],
+  "innerInstructions": [],
+  "transfers": [
+    {
+      "type": "transfer",
+      "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "info": {
+        "authority": "user",
+        "destination": "pool",
+        "destinationOwner": "pool-owner",
+        "mint": "BASE",
+        "source": "user-token",
+        "tokenAmount": {
+          "amount": "1000000",
+          "uiAmount": 1.0,
+          "decimals": 6
+        }
+      },
+      "idx": "0-0",
+      "timestamp": 1234567,
+      "signature": "sample-signature",
+      "isFee": false
+    },
+    {
+      "type": "transfer",
+      "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "info": {
+        "authority": "pool",
+        "destination": "user",
+        "destinationOwner": "user",
+        "mint": "QUOTE",
+        "source": "pool-token",
+        "tokenAmount": {
+          "amount": "2000000",
+          "uiAmount": 2.0,
+          "decimals": 6
+        }
+      },
+      "idx": "0-1",
+      "timestamp": 1234567,
+      "signature": "sample-signature",
+      "isFee": false
+    }
+  ],
+  "meta": {
+    "fee": 5000,
+    "computeUnits": 200000,
+    "status": "SUCCESS",
+    "solBalanceChanges": {
+      "user": { "pre": 10000000, "post": 9995000, "change": -5000 }
+    },
+    "tokenBalanceChanges": {
+      "user": {
+        "BASE": { "pre": 0, "post": -1000000, "change": -1000000 },
+        "QUOTE": { "pre": 0, "post": 2000000, "change": 2000000 }
+      }
+    }
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "aggregateTrade": {
+    "Pool": [],
+    "amm": "Jupiter",
+    "fee": {
+      "amount": 5e-6,
+      "amountRaw": "5000",
+      "decimals": 9,
+      "mint": "SOL"
+    },
+    "fees": [],
+    "idx": "0-0",
+    "inputToken": {
+      "amount": 1.0,
+      "amountRaw": "1000000",
+      "authority": "user",
+      "decimals": 6,
+      "destination": "pool",
+      "destinationOwner": "pool-owner",
+      "mint": "BASE",
+      "source": "user-token"
+    },
+    "outputToken": {
+      "amount": 2.0,
+      "amountRaw": "2000000",
+      "authority": "pool",
+      "decimals": 6,
+      "destination": "user",
+      "destinationOwner": "user",
+      "mint": "QUOTE",
+      "source": "pool-token"
+    },
+    "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    "signature": "sample-signature",
+    "signer": [
+      "user"
+    ],
+    "slot": 1,
+    "timestamp": 1234567,
+    "type": "SWAP",
+    "user": "user-token"
+  },
+  "computeUnits": 200000,
+  "fee": {
+    "amount": "5000",
+    "decimals": 9,
+    "uiAmount": 5e-6
+  },
+  "liquidities": [
+    {
+      "amm": "Jupiter",
+      "idx": "0-0",
+      "poolId": "BASE",
+      "poolLpMint": "QUOTE",
+      "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "signature": "sample-signature",
+      "signer": [
+        "user"
+      ],
+      "slot": 1,
+      "timestamp": 1234567,
+      "token0Amount": 3.0,
+      "token0AmountRaw": "3",
+      "token0Mint": "BASE",
+      "token1Mint": "QUOTE",
+      "type": "ADD",
+      "user": "user"
+    }
+  ],
+  "memeEvents": [
+    {
+      "baseMint": "BASE",
+      "creator": "user",
+      "decimals": 6,
+      "idx": "0-0",
+      "protocol": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "quoteMint": "BASE",
+      "signature": "sample-signature",
+      "slot": 1,
+      "timestamp": 1234567,
+      "type": "SWAP",
+      "user": "user-token"
+    },
+    {
+      "baseMint": "QUOTE",
+      "creator": "pool",
+      "decimals": 6,
+      "idx": "0-1",
+      "protocol": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "quoteMint": "QUOTE",
+      "signature": "sample-signature",
+      "slot": 1,
+      "timestamp": 1234567,
+      "type": "SWAP",
+      "user": "pool-token"
+    }
+  ],
+  "msg": null,
+  "signature": "sample-signature",
+  "signer": [
+    "user"
+  ],
+  "slot": 1,
+  "solBalanceChange": {
+    "change": -5000,
+    "post": 9995000,
+    "pre": 10000000
+  },
+  "state": true,
+  "timestamp": 1234567,
+  "tokenBalanceChange": {
+    "BASE": {
+      "change": -1000000,
+      "post": -1000000,
+      "pre": 0
+    },
+    "QUOTE": {
+      "change": 2000000,
+      "post": 2000000,
+      "pre": 0
+    }
+  },
+  "trades": [
+    {
+      "Pool": [],
+      "amm": "Jupiter",
+      "fees": [],
+      "idx": "0-0",
+      "inputToken": {
+        "amount": 1.0,
+        "amountRaw": "1000000",
+        "authority": "user",
+        "decimals": 6,
+        "destination": "pool",
+        "destinationOwner": "pool-owner",
+        "mint": "BASE",
+        "source": "user-token"
+      },
+      "outputToken": {
+        "amount": 2.0,
+        "amountRaw": "2000000",
+        "authority": "pool",
+        "decimals": 6,
+        "destination": "user",
+        "destinationOwner": "user",
+        "mint": "QUOTE",
+        "source": "pool-token"
+      },
+      "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "signature": "sample-signature",
+      "signer": [
+        "user"
+      ],
+      "slot": 1,
+      "timestamp": 1234567,
+      "type": "SWAP",
+      "user": "user-token"
+    }
+  ],
+  "transfers": [],
+  "txStatus": "SUCCESS"
+}

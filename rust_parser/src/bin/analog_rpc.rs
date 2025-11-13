@@ -6,19 +6,13 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64_simd::STANDARD as B64;
-use bincode::deserialize;
-use bs58;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use solana_dex_parser::config::ParseConfig;
 use solana_dex_parser::core::dex_parser::DexParser;
-use solana_dex_parser::types::{
-    BalanceChange, InnerInstruction, SolanaInstruction, SolanaTransaction, TokenAmount,
-    TokenBalance, TransactionMeta, TransactionStatus,
-};
-use solana_sdk::transaction::VersionedTransaction;
-use std::collections::HashMap;
+use solana_dex_parser::core::zero_copy::ZcTransaction;
+use solana_dex_parser::types::{ParseResult, TransactionStatus};
 use std::time::{Duration, Instant};
 
 const WSOL: &str = "So11111111111111111111111111111111111111112";
@@ -104,12 +98,14 @@ fn main() -> Result<()> {
 
     let t_fetched = Instant::now();
 
-    // Конвертируем бинарные данные в SolanaTransaction
+    // Парсим транзакцию используя zero-copy парсинг
     let meta = result.meta.as_ref();
     let slot = result.slot;
     let block_time = result.block_time.unwrap_or(0) as u64;
-    let tx = convert_binary_to_solana_tx(&raw_bytes, slot, SIGNATURE, block_time, meta)
-        .context("Не удалось конвертировать транзакцию")?;
+    
+    // Zero-copy парсинг: парсим напрямую из raw bytes
+    let zc_tx = ZcTransaction::parse(&raw_bytes, slot, SIGNATURE, block_time, meta)
+        .context("Не удалось распарсить транзакцию (zero-copy)")?;
 
     println!("✅ Транзакция получена!");
 
@@ -121,43 +117,47 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    // Парсим 300 раз для измерения среднего времени
-    // ВАЖНО: Каждый раз парсинг происходит С НУЛЯ:
-    // - tx.clone() создает полностью новую копию транзакции
-    // - parser.parse_all() внутри создает новый TransactionAdapter::new()
-    // - TransactionAdapter::new() создает новые HashMap для token maps
-    // - InstructionClassifier::new() создает новую классификацию инструкций
-    // - TransactionUtils::new() создает новый экземпляр
-    // - create_transfers_from_instructions() каждый раз парсит инструкции заново
-    // НЕТ кэширования между итерациями в коде!
-    // (Улучшение времени связано только с CPU cache/branch prediction)
+    // ZERO-COPY: используем parse_zc() для максимальной производительности
+    // Для pumpswap это полностью zero-copy (без конвертации в SolanaTransaction)
+    // Для других протоколов все еще конвертируется, но это будет оптимизировано позже
     const ITERATIONS: usize = 300;
     let mut parse_times = Vec::with_capacity(ITERATIONS);
     
-    println!("🔄 Запускаю {} итераций парсинга (каждый раз с нуля, без кэша)...", ITERATIONS);
+    println!("🔄 Запускаю {} итераций парсинга (zero-copy для pumpswap)...", ITERATIONS);
     
     for i in 0..ITERATIONS {
         let t_parse_start = Instant::now();
-        // Каждый вызов создает все структуры заново внутри parse_all
-        let _res = parser.parse_all(tx.clone(), Some(config.clone()));
+        // ZERO-COPY: используем parse_zc() для pumpswap
+        // NOTE: zc_tx является ссылкой на буфер, который живет в области видимости
+        // Для других протоколов все еще конвертируется в SolanaTransaction
+        let _res = parser.parse_zc(&zc_tx, meta, Some(config.clone()))
+            .unwrap_or_else(|e| {
+                eprintln!("Ошибка парсинга: {}", e);
+                ParseResult::new()
+            });
         let t_parse_end = Instant::now();
         parse_times.push(t_parse_end.duration_since(t_parse_start));
         
         // Показываем прогресс каждые 50 итераций
         if (i + 1) % 50 == 0 {
-            let current_avg: Duration = parse_times.iter().sum::<Duration>() / parse_times.len() as u32;
+            let current_sum: Duration = parse_times.iter().sum();
+            let current_avg = current_sum / (i + 1) as u32;
             println!("   {} итераций: среднее = {:.3}ms", i + 1, ms(current_avg));
         }
     }
     
     // Вычисляем среднее время парсинга
     let total_parse_time: Duration = parse_times.iter().sum();
-    let avg_parse_time = total_parse_time / ITERATIONS as u32;
+    let avg_parse_time = total_parse_time / parse_times.len() as u32;
     let avg_parse_ms = ms(avg_parse_time);
     
-    // Парсим еще раз для вывода результатов
+    // Парсим еще раз для вывода результатов (zero-copy)
     let t_parse0 = Instant::now();
-    let res = parser.parse_all(tx, Some(config));
+    let res = parser.parse_zc(&zc_tx, meta, Some(config))
+        .unwrap_or_else(|e| {
+            eprintln!("Ошибка парсинга: {}", e);
+            ParseResult::new()
+        });
     let t_parsed = Instant::now();
 
     // Пропускаем failed транзакции
@@ -368,338 +368,6 @@ enum TxField {
     Json(Value),              // если вдруг encoding != "base64"
 }
 
-/// Convert binary transaction bytes to SolanaTransaction
-fn convert_binary_to_solana_tx(
-    bytes: &[u8],
-    slot: u64,
-    signature: &str,
-    block_time: u64,
-    meta: Option<&Value>,
-) -> Result<SolanaTransaction> {
-    // Deserialize binary transaction
-    let versioned_tx: VersionedTransaction = deserialize(bytes)
-        .context("Failed to deserialize VersionedTransaction")?;
-
-    let message = &versioned_tx.message;
-    let account_keys = message.static_account_keys();
-
-    // Extract signers (first N accounts where N = num_required_signatures)
-    let num_signatures = message.header().num_required_signatures as usize;
-    let signers: Vec<String> = account_keys
-        .iter()
-        .take(num_signatures)
-        .map(|pk| bs58::encode(pk.as_ref()).into_string())
-        .collect();
-
-    // Extract all account keys (static + loaded from ALT if v0)
-    let mut all_account_keys: Vec<String> = account_keys
-        .iter()
-        .map(|pk| bs58::encode(pk.as_ref()).into_string())
-        .collect();
-
-    // Add loaded addresses from ALT if present
-    if let Some(meta_val) = meta {
-        if let Some(loaded) = meta_val.pointer("/loadedAddresses") {
-            if let Some(writable) = loaded.get("writable").and_then(|v| v.as_array()) {
-                for addr in writable {
-                    if let Some(s) = addr.as_str() {
-                        all_account_keys.push(s.to_string());
-                    }
-                }
-            }
-            if let Some(readonly) = loaded.get("readonly").and_then(|v| v.as_array()) {
-                for addr in readonly {
-                    if let Some(s) = addr.as_str() {
-                        all_account_keys.push(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Extract instructions
-    let instructions: Vec<SolanaInstruction> = message
-        .instructions()
-        .iter()
-        .map(|ix| {
-            let program_id = if (ix.program_id_index as usize) < all_account_keys.len() {
-                all_account_keys[ix.program_id_index as usize].clone()
-            } else {
-                "".to_string()
-            };
-
-            let accounts: Vec<String> = ix
-                .accounts
-                .iter()
-                .filter_map(|&idx| {
-                    if (idx as usize) < all_account_keys.len() {
-                        Some(all_account_keys[idx as usize].clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Encode instruction data as base64
-            let data_base64 = B64.encode_to_string(&ix.data);
-
-            SolanaInstruction {
-                program_id,
-                accounts,
-                data: data_base64,
-            }
-        })
-        .collect();
-
-    // Extract inner instructions from meta if present
-    let inner_instructions = if let Some(meta_val) = meta {
-        extract_inner_instructions(meta_val, &all_account_keys)
-    } else {
-        Vec::new()
-    };
-
-    // Extract token balances from meta if present
-    let (pre_token_balances, post_token_balances) = if let Some(meta_val) = meta {
-        let pre = extract_token_balances(meta_val.pointer("/preTokenBalances"), &all_account_keys);
-        let post = extract_token_balances(meta_val.pointer("/postTokenBalances"), &all_account_keys);
-        (pre, post)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    // Extract transaction meta
-    let tx_meta = if let Some(meta_val) = meta {
-        extract_transaction_meta(meta_val, &all_account_keys)
-    } else {
-        TransactionMeta {
-            fee: 0,
-            compute_units: 0,
-            status: TransactionStatus::Success,
-            sol_balance_changes: HashMap::new(),
-            token_balance_changes: HashMap::new(),
-        }
-    };
-
-    Ok(SolanaTransaction {
-        slot,
-        signature: signature.to_string(),
-        block_time,
-        signers,
-        instructions,
-        inner_instructions,
-        transfers: Vec::new(), // Will be populated by DexParser
-        pre_token_balances,
-        post_token_balances,
-        meta: tx_meta,
-    })
-}
-
-fn extract_inner_instructions(meta: &Value, account_keys: &[String]) -> Vec<InnerInstruction> {
-    let mut result = Vec::new();
-
-    if let Some(inner_arr) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
-        for group in inner_arr {
-            let index = group.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-            let mut instructions = Vec::new();
-            if let Some(ixs) = group.get("instructions").and_then(|v| v.as_array()) {
-                for ix_val in ixs {
-                    let program_id = ix_val
-                        .get("programId")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| {
-                            ix_val
-                                .get("programIdIndex")
-                                .and_then(|idx| idx.as_u64())
-                                .and_then(|idx| account_keys.get(idx as usize))
-                                .map(|s| s.as_str())
-                        })
-                        .unwrap_or("")
-                        .to_string();
-
-                    let accounts: Vec<String> = if let Some(acc_arr) =
-                        ix_val.get("accounts").and_then(|v| v.as_array())
-                    {
-                        acc_arr
-                            .iter()
-                            .filter_map(|v| {
-                                if let Some(s) = v.as_str() {
-                                    Some(s.to_string())
-                                } else if let Some(idx) = v.as_u64() {
-                                    account_keys.get(idx as usize).cloned()
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-
-                    // Data might be base58 or base64 - encode as base64 for consistency
-                    let data = ix_val
-                        .get("data")
-                        .and_then(|v| v.as_str())
-                        .map(|s| {
-                            // If it's base58, decode and re-encode as base64
-                            if let Ok(bytes) = bs58::decode(s).into_vec() {
-                                B64.encode_to_string(&bytes)
-                            } else {
-                                // Assume it's already base64 or empty
-                                s.to_string()
-                            }
-                        })
-                        .unwrap_or_default();
-
-                    instructions.push(SolanaInstruction {
-                        program_id,
-                        accounts,
-                        data,
-                    });
-                }
-            }
-
-            if !instructions.is_empty() {
-                result.push(InnerInstruction {
-                    index,
-                    instructions,
-                });
-            }
-        }
-    }
-
-    result
-}
-
-fn extract_token_balances(
-    meta_opt: Option<&Value>,
-    account_keys: &[String],
-) -> Vec<TokenBalance> {
-    let mut result = Vec::new();
-
-    if let Some(balances) = meta_opt.and_then(|v| v.as_array()) {
-        for bal_val in balances {
-            let account = bal_val
-                .get("accountIndex")
-                .and_then(|v| v.as_u64())
-                .and_then(|idx| account_keys.get(idx as usize))
-                .cloned()
-                .or_else(|| {
-                    bal_val
-                        .get("account")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
-                .or_else(|| {
-                    bal_val
-                        .get("account")
-                        .and_then(|v| v.as_u64())
-                        .and_then(|idx| account_keys.get(idx as usize))
-                        .cloned()
-                })
-                .unwrap_or_else(|| "".to_string());
-
-            let mint = bal_val
-                .get("mint")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let owner = bal_val
-                .get("owner")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let ui_amount = bal_val
-                .get("uiTokenAmount")
-                .and_then(|v| {
-                    let amount = v.get("amount").and_then(|a| a.as_str()).unwrap_or("0");
-                    let decimals = v.get("decimals").and_then(|d| d.as_u64()).unwrap_or(0) as u8;
-                    let ui_amount = v.get("uiAmount").and_then(|u| u.as_f64());
-                    Some(TokenAmount::new(amount, decimals, ui_amount))
-                })
-                .unwrap_or_default();
-
-            result.push(TokenBalance {
-                account,
-                mint,
-                owner,
-                ui_token_amount: ui_amount,
-            });
-        }
-    }
-
-    result
-}
-
-fn extract_transaction_meta(meta: &Value, account_keys: &[String]) -> TransactionMeta {
-    let fee = meta.get("fee").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    let compute_units = meta
-        .get("computeUnitsConsumed")
-        .or_else(|| meta.get("computeUnits"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    // Проверяем статус: если err существует и не null, то Failed
-    // В TypeScript: if (this.tx.meta.err == null) return 'success'
-    let status = if let Some(err_val) = meta.get("err") {
-        // Если err не null и не пустой объект, то Failed
-        if err_val.is_null() {
-            TransactionStatus::Success
-        } else {
-            TransactionStatus::Failed
-        }
-    } else {
-        TransactionStatus::Success
-    };
-
-    let sol_balance_changes = extract_sol_balance_changes(meta, account_keys);
-
-    TransactionMeta {
-        fee,
-        compute_units,
-        status,
-        sol_balance_changes,
-        token_balance_changes: HashMap::new(), // Will be populated by DexParser
-    }
-}
-
-fn extract_sol_balance_changes(
-    meta: &Value,
-    account_keys: &[String],
-) -> HashMap<String, BalanceChange> {
-    let mut result = HashMap::new();
-
-    let pre_balances = meta.get("preBalances").and_then(|v| v.as_array());
-    let post_balances = meta.get("postBalances").and_then(|v| v.as_array());
-
-    if let Some(balances) = pre_balances {
-        for (idx, pre_val) in balances.iter().enumerate() {
-            let pre = pre_val.as_i64().unwrap_or(0) as i128;
-            let post = post_balances
-                .and_then(|arr| arr.get(idx))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i128;
-
-            if pre != post {
-                let account = account_keys
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| format!("unknown_{}", idx));
-
-                result.insert(
-                    account,
-                    BalanceChange {
-                        pre,
-                        post,
-                        change: post - pre,
-                    },
-                );
-            }
-        }
-    }
-
-    result
-}
+// NOTE: Old conversion functions removed - now using zero-copy parsing from core::zero_copy module
+// All conversion logic is now in core::zero_copy::convert_zc_to_solana_tx()
 

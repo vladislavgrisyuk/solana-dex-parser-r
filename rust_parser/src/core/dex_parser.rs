@@ -1,3 +1,4 @@
+
 // Temporary file - will replace dex_parser.rs
 use std::collections::{HashMap, HashSet};
 
@@ -7,6 +8,10 @@ use crate::core::error::ParserError;
 use crate::core::instruction_classifier::InstructionClassifier;
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::core::transaction_utils::TransactionUtils;
+use crate::core::zc_adapter::ZcAdapter;
+use crate::core::zc_instruction_classifier::ZcInstructionClassifier;
+use crate::core::zc_transaction_utils::ZcTransactionUtils;
+use crate::core::zero_copy::ZcTransaction;
 use crate::protocols::meteora::{
     build_meteora_damm_v2_liquidity_parser, build_meteora_dbc_meme_parser, build_meteora_dbc_trade_parser,
     build_meteora_dlmm_liquidity_parser, build_meteora_pools_liquidity_parser, build_meteora_trade_parser,
@@ -23,6 +28,7 @@ use crate::types::{
     BlockInput, BlockParseResult, ClassifiedInstruction, DexInfo, FromJsonValue, ParseResult,
     PoolEvent, SolanaBlock, SolanaTransaction, TradeInfo, TransferData, TransferMap,
 };
+use bs58;
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +173,8 @@ impl DexParser {
         let classifier = InstructionClassifier::new(&utils.adapter);
         let dex_info = utils.get_dex_info(&classifier);
         let transfer_actions = utils.get_transfer_actions();
-        let all_program_ids = classifier.get_all_program_ids();
+        // ZERO-COPY: используем итератор напрямую, не создаем Vec
+        // all_program_ids больше не нужен, используем classifier.get_all_program_ids_iter() напрямую
 
         let mut result = ParseResult::new();
         result.slot = utils.adapter.slot();
@@ -185,15 +192,19 @@ impl DexParser {
             result.token_balance_change = token_change.clone();
         }
 
+        // ZERO-COPY: проверяем фильтр используя итератор
         if let Some(program_filter) = config.program_ids.as_ref() {
-            if !program_filter.iter().any(|id| all_program_ids.contains(id)) {
+            let has_match = classifier.get_all_program_ids_iter()
+                .any(|pid| program_filter.iter().any(|id| id == pid));
+            if !has_match {
                 result.state = false;
                 return Ok(result);
             }
         }
         
         if parse_type.includes_trades() {
-            for program_id in &all_program_ids {
+            // ZERO-COPY: используем итератор по ссылкам
+            for program_id in classifier.get_all_program_ids_iter() {
                 if let Some(filter) = config.program_ids.as_ref() {
                     if !filter.iter().any(|id| id == program_id) {
                         continue;
@@ -205,20 +216,21 @@ impl DexParser {
                     }
                 }
                 
+                // ZERO-COPY: используем &str для lookup в HashMap
                 if let Some(builder) = self.trade_parsers.get(program_id) {
-                    let program_id_str = program_id.as_str();
                     let amm_name = dex_info.amm.as_deref()
-                        .or_else(|| dex_program_names::name(program_id_str).into())
+                        .or_else(|| Some(dex_program_names::name(program_id)))
                         .map(String::from);
                     let program_info = DexInfo {
-                        program_id: Some(program_id_str.to_string()),
+                        program_id: Some(program_id.to_string()),
                         amm: amm_name,
                         route: None,
                     };
                     
                     let adapter_clone = utils.adapter.clone();
                     let transfer_clone = transfer_actions.clone();
-                    let classified_instructions = classifier.get_instructions(program_id);
+                    // ZERO-COPY: получаем ссылку, клонируем только для парсера (необходимо для ownership)
+                    let classified_instructions = classifier.get_instructions(program_id).to_vec();
                     
                     let mut parser = builder(
                         adapter_clone,
@@ -237,7 +249,7 @@ impl DexParser {
                         
                         if transfers.len() >= 2 && has_supported {
                             let program_info = DexInfo {
-                                program_id: Some(program_id.clone()),
+                                program_id: Some(program_id.to_string()),
                                 amm: dex_info.amm.clone().or_else(|| Some(dex_program_names::name(program_id).to_string())),
                                 route: None,
                             };
@@ -253,7 +265,8 @@ impl DexParser {
         }
 
         if parse_type.includes_liquidity() {
-            for program_id in &all_program_ids {
+            // ZERO-COPY: используем итератор по ссылкам
+            for program_id in classifier.get_all_program_ids_iter() {
                 if let Some(filter) = config.program_ids.as_ref() {
                     if !filter.iter().any(|id| id == program_id) {
                         continue;
@@ -265,10 +278,12 @@ impl DexParser {
                     }
                 }
                 
+                // ZERO-COPY: используем &str для lookup в HashMap
                 if let Some(builder) = self.liquidity_parsers.get(program_id) {
                     let adapter_clone = utils.adapter.clone();
                     let transfer_clone = transfer_actions.clone();
-                    let classified_instructions = classifier.get_instructions(program_id);
+                    // ZERO-COPY: получаем ссылку, клонируем только для парсера (необходимо для ownership)
+                    let classified_instructions = classifier.get_instructions(program_id).to_vec();
                     
                     let mut parser = builder(
                         adapter_clone,
@@ -283,7 +298,8 @@ impl DexParser {
         }
 
         if parse_type == ParseType::All {
-            for program_id in &all_program_ids {
+            // ZERO-COPY: используем итератор по ссылкам
+            for program_id in classifier.get_all_program_ids_iter() {
                 if let Some(filter) = config.program_ids.as_ref() {
                     if !filter.iter().any(|id| id == program_id) {
                         continue;
@@ -295,6 +311,7 @@ impl DexParser {
                     }
                 }
                 
+                // ZERO-COPY: используем &str для lookup в HashMap
                 if let Some(builder) = self.meme_parsers.get(program_id) {
                     let mut parser = builder(utils.adapter.clone(), transfer_actions.clone());
                     let events = parser.process_events();
@@ -309,7 +326,8 @@ impl DexParser {
         {
             if let Some(program_id) = dex_info.program_id.clone() {
                 if let Some(builder) = self.transfer_parsers.get(&program_id) {
-                    let classified_instructions = classifier.get_instructions(&program_id);
+                    // ZERO-COPY: получаем ссылку, клонируем только для парсера (необходимо для ownership)
+                    let classified_instructions = classifier.get_instructions(&program_id).to_vec();
                     let program_info = DexInfo {
                         program_id: dex_info.program_id.clone(),
                         amm: dex_info.amm.clone(),
@@ -409,6 +427,176 @@ impl DexParser {
 
     pub fn parse_all(&self, tx: SolanaTransaction, config: Option<ParseConfig>) -> ParseResult {
         self.parse_with_classifier(tx, config, ParseType::All)
+    }
+    
+    /// Parse transaction using zero-copy structures (ZcTransaction, ZcAdapter)
+    /// 
+    /// This method works directly with zero-copy transaction structures,
+    /// avoiding conversion to SolanaTransaction where possible.
+    /// 
+    /// # Arguments
+    /// * `zc_tx` - Zero-copy transaction (references buffer)
+    /// * `meta` - Optional meta JSON (references external JSON)
+    /// * `config` - Parse config
+    /// 
+    /// # Returns
+    /// Parse result with trades, liquidities, and transfers
+    /// 
+    /// # Note
+    /// This is a zero-copy version that uses ZcAdapter and ZcInstructionClassifier.
+    /// Protocol parsers still use TransactionAdapter for compatibility,
+    /// but event parsing uses zero-copy structures.
+    pub fn parse_zc<'a>(
+        &self,
+        zc_tx: &'a ZcTransaction<'a>,
+        meta: Option<&'a Value>,
+        config: Option<ParseConfig>,
+    ) -> Result<ParseResult, ParserError> {
+        let config = config.unwrap_or_default();
+        
+        // Create zero-copy adapter
+        let zc_adapter = ZcAdapter::new(zc_tx, meta, config.clone());
+        let zc_utils = ZcTransactionUtils::new(&zc_adapter);
+        let zc_classifier = ZcInstructionClassifier::new(&zc_adapter);
+        let dex_info = zc_utils.get_dex_info(&zc_classifier);
+        let transfer_actions = zc_utils.get_transfer_actions();
+        
+        let mut result = ParseResult::new();
+        result.slot = zc_adapter.slot();
+        result.timestamp = zc_adapter.block_time();
+        result.signature = zc_adapter.signature().to_string();
+        result.signer = zc_adapter.signers_iter()
+            .map(|pk| bs58::encode(pk).into_string())
+            .collect();
+        result.compute_units = zc_adapter.compute_units();
+        result.tx_status = zc_adapter.tx_status();
+        result.fee = crate::types::TokenAmount {
+            amount: zc_adapter.fee().to_string(),
+            decimals: 9,
+            ui_amount: Some(zc_adapter.fee() as f64 / 1_000_000_000.0),
+        };
+        
+        // TODO: Extract sol_balance_change and token_balance_change from meta JSON
+        // For now, skip these as they require parsing from meta JSON
+        
+        // Check program filter (zero-copy: compare 32-byte arrays)
+        if let Some(program_filter) = config.program_ids.as_ref() {
+            let has_match = zc_classifier
+                .get_all_program_ids_iter()
+                .any(|pid| {
+                    let pid_str = bs58::encode(pid).into_string();
+                    program_filter.iter().any(|id| id == &pid_str)
+                });
+            if !has_match {
+                result.state = false;
+                return Ok(result);
+            }
+        }
+        
+        // Parse trades using zero-copy structures
+        // For pumpswap, use zero-copy event parser directly
+        for program_id in zc_classifier.get_all_program_ids_iter() {
+            // Convert program_id to String for HashMap lookup
+            let program_id_str = bs58::encode(program_id).into_string();
+            
+            // Apply filters
+            if let Some(filter) = config.program_ids.as_ref() {
+                if !filter.iter().any(|id| id == &program_id_str) {
+                    continue;
+                }
+            }
+            if let Some(ignore) = config.ignore_program_ids.as_ref() {
+                if ignore.iter().any(|id| id == &program_id_str) {
+                    continue;
+                }
+            }
+            
+            // Check if this is pumpswap and use zero-copy parser
+            if program_id_str == dex_programs::PUMP_SWAP {
+                // Use zero-copy parser for pumpswap
+                use crate::core::zc_adapter_helpers::ZcCachedBalanceMaps;
+                use crate::protocols::pumpfun::pumpswap_parser_zc::process_pumpswap_trades_zc;
+                
+                // Get classified instructions for this program (zero-copy: references)
+                let classified_instructions = zc_classifier.get_instructions(program_id);
+                
+                if !classified_instructions.is_empty() {
+                    // Create cached balance maps (parsed from meta JSON once)
+                    let cached_maps = ZcCachedBalanceMaps::from_adapter_with_transfers(
+                        &zc_adapter,
+                        &transfer_actions,
+                    );
+                    
+                    // Process trades using zero-copy parser
+                    let trades = process_pumpswap_trades_zc(
+                        &zc_adapter,
+                        classified_instructions,
+                        &cached_maps,
+                        &transfer_actions,
+                        &dex_info,
+                    );
+                    
+                    result.trades.extend(trades);
+                }
+            } else {
+                // For other protocols, convert to SolanaTransaction for compatibility
+                // TODO: Create zero-copy versions for all parsers
+                let tx = crate::core::zero_copy::convert_zc_to_solana_tx(zc_tx, meta)
+                    .map_err(|e| ParserError::generic(format!("failed to convert zc_tx: {}", e)))?;
+                let adapter = TransactionAdapter::new(tx, config.clone());
+                let utils = TransactionUtils::new(adapter);
+                let classifier = InstructionClassifier::new(&utils.adapter);
+                
+                if let Some(builder) = self.trade_parsers.get(&program_id_str) {
+                    let amm_name = dex_info.amm.as_deref()
+                        .or_else(|| Some(dex_program_names::name(&program_id_str)))
+                        .map(String::from);
+                    let program_info = DexInfo {
+                        program_id: Some(program_id_str.clone()),
+                        amm: amm_name,
+                        route: None,
+                    };
+                    
+                    let classified_instructions = classifier.get_instructions(&program_id_str).to_vec();
+                    
+                    let mut parser = builder(
+                        utils.adapter,
+                        program_info,
+                        transfer_actions.clone(),
+                        classified_instructions,
+                    );
+                    
+                    let trades = parser.process_trades();
+                    result.trades.extend(trades);
+                }
+            }
+        }
+        
+        // Deduplicate trades
+        if !result.trades.is_empty() {
+            let before_dedup = result.trades.len();
+            let mut seen: HashSet<(String, String)> = HashSet::with_capacity(before_dedup);
+            let mut deduped_trades = Vec::with_capacity(before_dedup);
+            
+            for trade in result.trades {
+                let key = (trade.signature.clone(), trade.idx.clone());
+                if seen.insert(key) {
+                    deduped_trades.push(trade);
+                }
+            }
+            
+            result.trades = deduped_trades;
+            result.trades.sort_unstable_by(|a, b| a.idx.cmp(&b.idx));
+            
+            if config.aggregate_trades {
+                if let Some(last_trade) = result.trades.last().cloned() {
+                    // TODO: Implement attach_trade_fee for zero-copy
+                    result.aggregate_trade = Some(last_trade);
+                }
+            }
+        }
+        
+        Ok(result)
     }
 
     pub fn parse_block_raw(

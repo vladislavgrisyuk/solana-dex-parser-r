@@ -8,6 +8,7 @@ pub mod pumpswap_event_parser;
 pub mod pumpswap_instruction_parser;
 pub mod pumpswap_liquidity_parser;
 pub mod pumpswap_parser;
+pub mod pumpswap_parser_zc;
 pub mod util;
 
 use crate::core::transaction_adapter::TransactionAdapter;

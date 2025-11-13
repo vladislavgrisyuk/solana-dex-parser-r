@@ -79,7 +79,8 @@ impl PumpfunMemeParser {
 impl MemeEventParser for PumpfunMemeParser {
     fn process_events(&mut self) -> Vec<MemeEvent> {
         let classifier = InstructionClassifier::new(&self.adapter);
-        let instructions = classifier.get_instructions(PUMP_FUN_PROGRAM_ID);
+        // ZERO-COPY: получаем ссылку, клонируем только если нужно
+        let instructions = classifier.get_instructions(PUMP_FUN_PROGRAM_ID).to_vec();
         // Оптимизация: не клонируем адаптер, передаем по ссылке
         let parser = PumpfunEventParser::new();
         match parser.parse_instructions(&self.adapter, &instructions) {

@@ -185,6 +185,7 @@ pub fn attach_token_transfers(
     }
 
     if trade.signer.is_none() {
+        // ZERO-COPY: клонируем signers только один раз
         trade.signer = Some(adapter.signers().to_vec());
     }
 
@@ -271,8 +272,10 @@ pub fn get_pumpfun_trade_info(
         route: Some(dex_info.route.clone().unwrap_or_default()),
         slot: adapter.slot(),
         timestamp: event.timestamp,
+        // ZERO-COPY: используем Arc::clone для signature (дешевая операция)
         signature: event.signature.clone(),
         idx: event.idx.clone(),
+        // ZERO-COPY: клонируем signers только один раз
         signer: Some(adapter.signers().to_vec()),
     }
 }

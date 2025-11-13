@@ -78,6 +78,7 @@ impl MeteoraDBCEventParser {
                     );
 
                     if transfers.len() >= 2 {
+                        // ZERO-COPY: клонируем только первые 2 transfers (необходимо для process_swap_data)
                         let transfer_vec: Vec<TransferData> = transfers.iter().take(2).map(|t| (*t).clone()).collect();
                         if let Some(trade) = self.utils.process_swap_data(&transfer_vec, &crate::types::DexInfo::default()) {
                             meme_event.input_token = Some(trade.input_token);
@@ -289,8 +290,9 @@ impl MeteoraDBCEventParser {
 impl MemeEventParser for MeteoraDBCEventParser {
     fn process_events(&mut self) -> Vec<MemeEvent> {
         let classifier = InstructionClassifier::new(&self.adapter);
+        // ZERO-COPY: получаем ссылку, передаем как срез
         let instructions = classifier.get_instructions(program_ids::METEORA_DBC);
-        self.parse_instructions(&instructions)
+        self.parse_instructions(instructions)
     }
 }
 

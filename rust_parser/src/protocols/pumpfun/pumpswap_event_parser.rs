@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::core::transaction_adapter::TransactionAdapter;
+use crate::core::zc_adapter::ZcAdapter;
+use crate::core::zc_instruction_classifier::ZcClassifiedInstruction;
 use crate::types::ClassifiedInstruction;
+use bs58;
 
 use super::binary_reader::BinaryReaderRef;
 use super::constants::discriminators::pumpswap_events;
@@ -163,6 +166,7 @@ impl PumpswapEventParser {
         Self
     }
 
+    /// Parse instructions using TransactionAdapter (for backward compatibility)
     pub fn parse_instructions(
         &self,
         adapter: &TransactionAdapter,
@@ -172,6 +176,7 @@ impl PumpswapEventParser {
         let slot = adapter.slot();
         let timestamp = adapter.block_time();
         // ОПТИМИЗАЦИЯ: создаем Arc один раз для всех событий
+        // ZERO-COPY: клонируем только один раз, переиспользуем Arc для всех событий
         let signature_arc = Arc::new(adapter.signature().to_string());
         let signers_arc = Arc::new(adapter.signers().to_vec());
 
@@ -181,75 +186,157 @@ impl PumpswapEventParser {
                 Err(_) => continue,
             };
 
-            if data.len() < 16 {
-                continue;
-            }
-
-            // ОПТИМИЗАЦИЯ: используем u128 для быстрого сравнения
-            let disc_bytes: [u8; 16] = match data[..16].try_into() {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let disc_u128 = u128::from_le_bytes(disc_bytes);
-            
-            let event_type = match disc_u128 {
-                x if x == pumpswap_events::CREATE_POOL_U128 => Some(PumpswapEventType::Create),
-                x if x == pumpswap_events::ADD_LIQUIDITY_U128 => Some(PumpswapEventType::Add),
-                x if x == pumpswap_events::REMOVE_LIQUIDITY_U128 => Some(PumpswapEventType::Remove),
-                x if x == pumpswap_events::BUY_U128 => Some(PumpswapEventType::Buy),
-                x if x == pumpswap_events::SELL_U128 => Some(PumpswapEventType::Sell),
-                _ => {
-                    // ОПТИМИЗАЦИЯ: логируем только при debug уровне
-                    #[cfg(debug_assertions)]
-                    if tracing::enabled!(tracing::Level::DEBUG) {
-                        tracing::debug!("Unexpected discriminator: {}", hex::encode(&data[..16]));
-                    }
-                    None
-                }
-            };
-
-            if let Some(event_type) = event_type {
-                // ОПТИМИЗАЦИЯ: передаем срез вместо to_vec()
-                let payload = &data[16..];
-
-                let data_enum = match event_type {
-                    PumpswapEventType::Buy => {
-                        PumpswapEventData::Buy(Self::decode_buy_event(payload)?)
-                    }
-                    PumpswapEventType::Sell => {
-                        PumpswapEventData::Sell(Self::decode_sell_event(payload)?)
-                    }
-                    PumpswapEventType::Create => {
-                        PumpswapEventData::Create(Self::decode_create_event(payload)?)
-                    }
-                    PumpswapEventType::Add => {
-                        PumpswapEventData::Deposit(Self::decode_add_liquidity(payload)?)
-                    }
-                    PumpswapEventType::Remove => {
-                        PumpswapEventData::Withdraw(Self::decode_remove_liquidity(payload)?)
-                    }
-                };
-
-                let outer_idx = classified.outer_index as u16;
-                let inner_idx = classified.inner_index.unwrap_or(0) as u16;
-                // ОПТИМИЗАЦИЯ: создаем idx строку только для совместимости, но храним числовые значения
-                let idx = format!("{}-{}", outer_idx, inner_idx);
-
-                events.push(PumpswapEvent {
-                    event_type,
-                    data: data_enum,
-                    slot,
-                    timestamp,
-                    signature: Arc::clone(&signature_arc),
-                    idx,
-                    idx_outer: outer_idx,
-                    idx_inner: inner_idx,
-                    signer: Some(Arc::clone(&signers_arc)),
-                });
+            if let Some(event) = Self::parse_instruction_data(
+                &data,
+                slot,
+                timestamp,
+                &signature_arc,
+                &signers_arc,
+                classified.outer_index,
+                classified.inner_index,
+            )? {
+                events.push(event);
             }
         }
 
         Ok(sort_by_idx(events))
+    }
+    
+    /// Parse instructions using ZcAdapter (zero-copy version)
+    /// 
+    /// This method works directly with ZcInstruction data (references to buffer),
+    /// avoiding base64 decoding and minimizing allocations.
+    pub fn parse_instructions_zc<'a>(
+        &self,
+        adapter: &'a ZcAdapter<'a>,
+        instructions: &[ZcClassifiedInstruction<'a>],
+    ) -> Result<Vec<PumpswapEvent>, PumpfunError> {
+        let mut events: Vec<PumpswapEvent> = Vec::with_capacity(instructions.len());
+        let slot = adapter.slot();
+        let timestamp = adapter.block_time();
+        // ОПТИМИЗАЦИЯ: создаем Arc один раз для всех событий
+        // ZERO-COPY: используем &str reference, но конвертируем в String только один раз
+        let signature_arc = Arc::new(adapter.signature().to_string());
+        // ZERO-COPY: собираем signers как Vec<String> один раз
+        let signers_vec: Vec<String> = adapter.signers_iter()
+            .map(|pk| bs58::encode(pk).into_string())
+            .collect();
+        let signers_arc = Arc::new(signers_vec);
+
+        for classified in instructions {
+            // ZERO-COPY: используем данные инструкции напрямую из буфера
+            let data = adapter.instruction_data(classified.instruction);
+            
+            if data.len() < 16 {
+                continue;
+            }
+
+            if let Some(event) = Self::parse_instruction_data(
+                data,
+                slot,
+                timestamp,
+                &signature_arc,
+                &signers_arc,
+                classified.outer_index,
+                classified.inner_index,
+            )? {
+                events.push(event);
+            }
+        }
+
+        Ok(sort_by_idx(events))
+    }
+    
+    /// Parse instruction data (shared logic for both zero-copy and owned versions)
+    /// 
+    /// # Arguments
+    /// * `data` - Instruction data bytes (either from buffer or decoded base64)
+    /// * `slot` - Transaction slot
+    /// * `timestamp` - Transaction timestamp
+    /// * `signature_arc` - Shared signature Arc
+    /// * `signers_arc` - Shared signers Arc
+    /// * `outer_index` - Outer instruction index
+    /// * `inner_index` - Inner instruction index (None for outer)
+    /// 
+    /// # Returns
+    /// Optional event if discriminator matches
+    fn parse_instruction_data(
+        data: &[u8],
+        slot: u64,
+        timestamp: u64,
+        signature_arc: &Arc<String>,
+        signers_arc: &Arc<Vec<String>>,
+        outer_index: usize,
+        inner_index: Option<usize>,
+    ) -> Result<Option<PumpswapEvent>, PumpfunError> {
+        if data.len() < 16 {
+            return Ok(None);
+        }
+
+        // ОПТИМИЗАЦИЯ: используем u128 для быстрого сравнения
+        let disc_bytes: [u8; 16] = match data[..16].try_into() {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+        let disc_u128 = u128::from_le_bytes(disc_bytes);
+        
+        let event_type = match disc_u128 {
+            x if x == pumpswap_events::CREATE_POOL_U128 => Some(PumpswapEventType::Create),
+            x if x == pumpswap_events::ADD_LIQUIDITY_U128 => Some(PumpswapEventType::Add),
+            x if x == pumpswap_events::REMOVE_LIQUIDITY_U128 => Some(PumpswapEventType::Remove),
+            x if x == pumpswap_events::BUY_U128 => Some(PumpswapEventType::Buy),
+            x if x == pumpswap_events::SELL_U128 => Some(PumpswapEventType::Sell),
+            _ => {
+                // ОПТИМИЗАЦИЯ: логируем только при debug уровне
+                #[cfg(debug_assertions)]
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    tracing::debug!("Unexpected discriminator: {}", hex::encode(&data[..16]));
+                }
+                None
+            }
+        };
+
+        if let Some(event_type) = event_type {
+            // ZERO-COPY: передаем срез напрямую из буфера
+            let payload = &data[16..];
+
+            let data_enum = match event_type {
+                PumpswapEventType::Buy => {
+                    PumpswapEventData::Buy(Self::decode_buy_event(payload)?)
+                }
+                PumpswapEventType::Sell => {
+                    PumpswapEventData::Sell(Self::decode_sell_event(payload)?)
+                }
+                PumpswapEventType::Create => {
+                    PumpswapEventData::Create(Self::decode_create_event(payload)?)
+                }
+                PumpswapEventType::Add => {
+                    PumpswapEventData::Deposit(Self::decode_add_liquidity(payload)?)
+                }
+                PumpswapEventType::Remove => {
+                    PumpswapEventData::Withdraw(Self::decode_remove_liquidity(payload)?)
+                }
+            };
+
+            let outer_idx = outer_index as u16;
+            let inner_idx = inner_index.unwrap_or(0) as u16;
+            // ОПТИМИЗАЦИЯ: создаем idx строку только для совместимости
+            let idx = format!("{}-{}", outer_idx, inner_idx);
+
+            Ok(Some(PumpswapEvent {
+                event_type,
+                data: data_enum,
+                slot,
+                timestamp,
+                signature: Arc::clone(signature_arc),
+                idx,
+                idx_outer: outer_idx,
+                idx_inner: inner_idx,
+                signer: Some(Arc::clone(signers_arc)),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     #[inline]

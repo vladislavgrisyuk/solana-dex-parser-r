@@ -71,7 +71,7 @@ impl LiquidityParser for SimpleLiquidityParser {
                 let token1 = instruction.data.accounts.get(1).cloned();
 
                 PoolEvent {
-                    user: self.adapter.signer(),
+                    user: self.adapter.signer().to_string(),
                     event_type: TradeType::Add,
                     program_id: Some(instruction.program_id.clone()),
                     amm: Some(dex_program_names::name(&instruction.program_id).to_string()),

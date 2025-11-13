@@ -3487,6 +3487,7 @@ name = "solana-dex-parser"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrayref",
  "base64 0.21.7",
  "base64-simd",
  "bincode",

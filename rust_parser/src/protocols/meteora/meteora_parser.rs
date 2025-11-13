@@ -133,17 +133,12 @@ impl MeteoraParser {
         }
         
         // Ищем transfers по ключу (как в TypeScript)
-        let transfers = self.transfer_actions.get(&key_buf).map(|v| v.as_slice()).unwrap_or(&[]);
-        
-        // Фильтруем только transfer и transferChecked (как в TypeScript)
-        // ОПТИМИЗАЦИЯ: предварительно резервируем capacity
-        let mut result = Vec::with_capacity(transfers.len());
-        for t in transfers {
-            if matches!(t.transfer_type.as_str(), "transfer" | "transferChecked") {
-                result.push(t);
-            }
-        }
-        result
+        // ZERO-COPY: возвращаем ссылки на transfers из HashMap, фильтруем без клонирования
+        self.transfer_actions.get(&key_buf).map(|v| {
+            v.iter()
+                .filter(|t| matches!(t.transfer_type.as_str(), "transfer" | "transferChecked"))
+                .collect()
+        }).unwrap_or_default()
     }
 }
 
@@ -198,9 +193,8 @@ impl TradeParser for MeteoraParser {
             }
 
             // Передаем все transfers в process_swap_data, чтобы он суммировал все transfers с каждым mint
+            // ZERO-COPY: клонируем только при необходимости (process_swap_data требует &[TransferData])
             let transfers_vec: Vec<TransferData> = transfers.iter().map(|t| (*t).clone()).collect();
-
-            // Создаем trade через processSwapData
             let mut trade = match self.utils.process_swap_data(
                 &transfers_vec,
                 &DexInfo {

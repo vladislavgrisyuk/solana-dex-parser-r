@@ -11,6 +11,12 @@ pub fn get_instruction_data(instruction: &crate::types::SolanaInstruction) -> Ve
     STANDARD.decode_to_vec(&instruction.data).expect("base64 decode failed")
 }
 
+/// Get instruction data bytes from zero-copy instruction (zero-copy, no allocation)
+#[inline(always)]
+pub fn get_instruction_data_zc<'a>(instruction: &'a crate::core::zero_copy::ZcInstruction<'a>) -> &'a [u8] {
+    instruction.data
+}
+
 /// Get the name of a program by its ID.
 /// Returns "Unknown DEX" if not found.
 pub fn get_program_name(program_id: &str) -> &'static str {

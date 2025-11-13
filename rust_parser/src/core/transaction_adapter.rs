@@ -61,7 +61,13 @@ impl TransactionAdapter {
     }
 
     /// Первый подписант или "" (под TS get signer)
-    pub fn signer(&self) -> String {
+    /// ZERO-COPY: возвращает ссылку вместо клонирования
+    pub fn signer(&self) -> &str {
+        self.tx.signers.first().map(|s| s.as_str()).unwrap_or("")
+    }
+    
+    /// Первый подписант как String (для обратной совместимости)
+    pub fn signer_string(&self) -> String {
         self.tx.signers.first().cloned().unwrap_or_default()
     }
 
@@ -133,7 +139,13 @@ impl TransactionAdapter {
         &self.account_keys
     }
 
-    pub fn get_account_key(&self, index: usize) -> String {
+    /// ZERO-COPY: возвращает ссылку вместо клонирования
+    pub fn get_account_key(&self, index: usize) -> Option<&str> {
+        self.account_keys.get(index).map(|s| s.as_str())
+    }
+    
+    /// Получить account key как String (для обратной совместимости)
+    pub fn get_account_key_string(&self, index: usize) -> String {
         self.account_keys.get(index).cloned().unwrap_or_default()
     }
 
@@ -144,7 +156,13 @@ impl TransactionAdapter {
     /* ----------------------- инструкции ----------------------- */
 
     /// В нормализованных типах `SolanaInstruction` уже унифицирован.
-    pub fn get_instruction(&self, instruction: &SolanaInstruction) -> SolanaInstruction {
+    /// ZERO-COPY: возвращает ссылку вместо клонирования
+    pub fn get_instruction<'a>(&self, instruction: &'a SolanaInstruction) -> &'a SolanaInstruction {
+        instruction
+    }
+    
+    /// Получить инструкцию как клон (для обратной совместимости)
+    pub fn get_instruction_clone(&self, instruction: &SolanaInstruction) -> SolanaInstruction {
         instruction.clone()
     }
 
@@ -226,14 +244,20 @@ impl TransactionAdapter {
 
 
     /// Владелец токен-аккаунта по post/pre token balances
-    pub fn get_token_account_owner(&self, account_key: &str) -> Option<String> {
+    /// ZERO-COPY: возвращает ссылку вместо клонирования
+    pub fn get_token_account_owner(&self, account_key: &str) -> Option<&str> {
         if let Some(b) = self.post_token_balances().iter().find(|b| b.account == account_key) {
-            return b.owner.clone();
+            return b.owner.as_deref();
         }
         if let Some(b) = self.pre_token_balances().iter().find(|b| b.account == account_key) {
-            return b.owner.clone();
+            return b.owner.as_deref();
         }
         None
+    }
+    
+    /// Получить owner как String (для обратной совместимости)
+    pub fn get_token_account_owner_string(&self, account_key: &str) -> Option<String> {
+        self.get_token_account_owner(account_key).map(|s| s.to_string())
     }
 
     pub fn get_account_balance(&self, account_keys: &[String]) -> Vec<Option<TokenAmount>> {
@@ -316,7 +340,8 @@ impl TransactionAdapter {
             return None;
         }
         // Оптимизация: прямой доступ к балансу signer без итерации по всем аккаунтам
-        self.tx.meta.sol_balance_changes.get(&signer).cloned()
+        // ZERO-COPY: используем String для lookup, но возвращаем клон BalanceChange (небольшая структура)
+        self.tx.meta.sol_balance_changes.get(signer).cloned()
     }
 
     /// Get token balance changes for the signer account (optimized: only process signer balances)
@@ -442,7 +467,7 @@ impl TransactionAdapter {
     /// База события пула (аналог TS getPoolEventBase)
     pub fn get_pool_event_base(&self, r#type: PoolEventType, program_id: &str) -> PoolEventBase {
         PoolEventBase {
-            user: self.signer(),
+            user: self.signer().to_string(),
             event_type: r#type,
             program_id: Some(program_id.to_string()),
             amm: Some(crate::core::utils::get_program_name(program_id).to_string()),
@@ -465,7 +490,7 @@ impl TransactionAdapter {
 
         for key in &self.account_keys {
             let account_key = if is_owner {
-                self.get_token_account_owner(key).unwrap_or_else(|| key.clone())
+                self.get_token_account_owner(key).map(|s| s.to_string()).unwrap_or_else(|| key.clone())
             } else {
                 key.clone()
             };
@@ -496,7 +521,7 @@ impl TransactionAdapter {
                 continue;
             }
             let account = if is_owner {
-                self.get_token_account_owner(&b.account).unwrap_or_else(|| b.account.clone())
+                self.get_token_account_owner(&b.account).map(|s| s.to_string()).unwrap_or_else(|| b.account.clone())
             } else {
                 b.account.clone()
             };
@@ -514,7 +539,7 @@ impl TransactionAdapter {
                 continue;
             }
             let account = if is_owner {
-                self.get_token_account_owner(&b.account).unwrap_or_else(|| b.account.clone())
+                self.get_token_account_owner(&b.account).map(|s| s.to_string()).unwrap_or_else(|| b.account.clone())
             } else {
                 b.account.clone()
             };

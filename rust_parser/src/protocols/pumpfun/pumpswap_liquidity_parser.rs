@@ -48,7 +48,7 @@ impl PumpswapLiquidityParser {
         data: &PumpswapCreatePoolEvent,
     ) -> PoolEvent {
         PoolEvent {
-            user: self.adapter.signer(),
+            user: self.adapter.signer().to_string(),
             event_type: TradeType::Create,
             program_id: Some(PUMP_SWAP_PROGRAM_ID.to_string()),
             amm: Some(PUMP_SWAP_PROGRAM_NAME.to_string()),
@@ -113,7 +113,7 @@ impl PumpswapLiquidityParser {
             .unwrap_or(lp_info.decimals);
 
         Some(PoolEvent {
-            user: self.adapter.signer(),
+            user: self.adapter.signer().to_string(),
             event_type: TradeType::Add,
             program_id: Some(PUMP_SWAP_PROGRAM_ID.to_string()),
             amm: Some(PUMP_SWAP_PROGRAM_NAME.to_string()),
@@ -178,7 +178,7 @@ impl PumpswapLiquidityParser {
             .unwrap_or(lp_info.decimals);
 
         Some(PoolEvent {
-            user: self.adapter.signer(),
+            user: self.adapter.signer().to_string(),
             event_type: TradeType::Remove,
             program_id: Some(PUMP_SWAP_PROGRAM_ID.to_string()),
             amm: Some(PUMP_SWAP_PROGRAM_NAME.to_string()),

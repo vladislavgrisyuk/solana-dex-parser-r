@@ -24,30 +24,31 @@ impl InstructionClassifier {
         let mut order: Vec<String> = Vec::with_capacity(outer_count / 2);
         let mut seen: HashSet<String> = HashSet::with_capacity(outer_count / 2);
 
-        // OUTER instructions - optimized: avoid multiple clones
+        // OUTER instructions - ZERO-COPY: минимизируем клонирования program_id
         for (outer_index, instruction) in adapter.instructions().iter().enumerate() {
             if instruction.program_id.is_empty() {
                 continue;
             }
-            let program_id = &instruction.program_id;
+            // ZERO-COPY: клонируем program_id только один раз для HashMap ключа
+            let program_id = instruction.program_id.clone();
             let classified = ClassifiedInstruction {
-                program_id: program_id.clone(),
+                program_id: program_id.clone(), // Переиспользуем уже клонированный program_id
                 outer_index,
                 inner_index: None,
                 data: instruction.clone(),
             };
             instruction_map
-                .entry(program_id.clone())
+                .entry(program_id.clone()) // Переиспользуем клон
                 .or_default()
                 .push(classified);
             if seen.insert(program_id.clone()) {
-                order.push(program_id.clone());
+                order.push(program_id); // Используем уже клонированный program_id
             }
         }
         #[cfg(debug_assertions)]
         let t1 = std::time::Instant::now();
 
-        // INNER instructions - optimized: avoid multiple clones
+        // INNER instructions - ZERO-COPY: минимизируем клонирования program_id
         #[cfg(debug_assertions)]
         let mut inner_count = 0;
         for inner in adapter.inner_instructions() {
@@ -59,19 +60,20 @@ impl InstructionClassifier {
                 {
                     inner_count += 1;
                 }
-                let program_id = &instruction.program_id;
+                // ZERO-COPY: клонируем program_id только один раз для HashMap ключа
+                let program_id = instruction.program_id.clone();
                 let classified = ClassifiedInstruction {
-                    program_id: program_id.clone(),
+                    program_id: program_id.clone(), // Переиспользуем уже клонированный program_id
                     outer_index: inner.index,
                     inner_index: Some(inner_index),
                     data: instruction.clone(),
                 };
                 instruction_map
-                    .entry(program_id.clone())
+                    .entry(program_id.clone()) // Переиспользуем клон
                     .or_default()
                     .push(classified);
                 if seen.insert(program_id.clone()) {
-                    order.push(program_id.clone());
+                    order.push(program_id); // Используем уже клонированный program_id
                 }
             }
         }
@@ -105,43 +107,37 @@ impl InstructionClassifier {
 
     /// Полный список program_id в порядке первого появления,
     /// но с фильтром как в TS: исключаем системные и «skip».
+    /// ZERO-COPY: возвращает итератор по ссылкам
+    pub fn get_all_program_ids_iter(&self) -> impl Iterator<Item = &str> {
+        self.order.iter()
+            .map(|pid| pid.as_str())
+            .filter(|pid_str| {
+                !SYSTEM_PROGRAMS.contains(pid_str) && !SKIP_PROGRAM_IDS.contains(pid_str)
+            })
+    }
+    
+    /// Получить все program_id как Vec (для обратной совместимости)
     pub fn get_all_program_ids(&self) -> Vec<String> {
-        // Optimized: pre-allocate with capacity and avoid timing in release
-        let mut result = Vec::with_capacity(self.order.len());
-        for pid in &self.order {
-            let pid_str = pid.as_str();
-            if !SYSTEM_PROGRAMS.contains(&pid_str) && !SKIP_PROGRAM_IDS.contains(&pid_str) {
-                result.push(pid.clone());
-            }
-        }
-        result
+        // ZERO-COPY: используем итератор, клонируем только в конце
+        self.get_all_program_ids_iter().map(|s| s.to_string()).collect()
     }
 
     /// Все инструкции по одному program_id
-    /// Оптимизация: возвращает клон только при необходимости
-    pub fn get_instructions(&self, program_id: &str) -> Vec<ClassifiedInstruction> {
-        // Optimized: avoid timing overhead in release builds
-        #[cfg(debug_assertions)]
-        let start = std::time::Instant::now();
-        
-        // Оптимизация: клонируем только если необходимо (это дешевая операция для Vec)
-        // Альтернатива: можно вернуть &[ClassifiedInstruction], но это требует изменения API
-        let result = self.instruction_map
+    /// ZERO-COPY: возвращает ссылку вместо клона
+    pub fn get_instructions(&self, program_id: &str) -> &[ClassifiedInstruction] {
+        // ZERO-COPY: возвращаем срез вместо клонирования
+        self.instruction_map
+            .get(program_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+    
+    /// Получить инструкции как Vec (для обратной совместимости)
+    pub fn get_instructions_clone(&self, program_id: &str) -> Vec<ClassifiedInstruction> {
+        self.instruction_map
             .get(program_id)
             .cloned()
-            .unwrap_or_default();
-        
-        #[cfg(debug_assertions)]
-        {
-            let duration = start.elapsed();
-            tracing::debug!(
-                "⏱️  get_instructions({}): total={:.3}μs, found {} instructions",
-                program_id,
-                duration.as_secs_f64() * 1_000_000.0,
-                result.len()
-            );
-        }
-        result
+            .unwrap_or_default()
     }
 
     /// Инструкции по нескольким program_id (flatten), как getMultiInstructions в TS

@@ -15,7 +15,8 @@ impl TransactionUtils {
     }
 
     pub fn get_dex_info(&self, classifier: &InstructionClassifier) -> DexInfo {
-        let all_program_ids = classifier.get_all_program_ids();
+        // ZERO-COPY: используем итератор, клонируем только при необходимости
+        let all_program_ids: Vec<String> = classifier.get_all_program_ids_iter().map(|s| s.to_string()).collect();
         let program_id = all_program_ids.into_iter().next();
         let amm = program_id.as_ref().map(|id| dex_program_names::name(id).to_string());
         
@@ -104,7 +105,9 @@ impl TransactionUtils {
                     ix,
                     &idx_buf,
                 ) {
-                    actions.entry(key_buf.clone()).or_insert_with(|| Vec::with_capacity(4)).push(transfer_data);
+                    // ZERO-COPY: клонируем key_buf только один раз для HashMap ключа
+                    let key = key_buf.clone();
+                    actions.entry(key).or_insert_with(|| Vec::with_capacity(4)).push(transfer_data);
                 }
             }
         }
@@ -319,7 +322,8 @@ impl TransactionUtils {
         };
         
         // Получаем destination owner
-        let destination_owner = adapter.get_token_account_owner(destination);
+        // ZERO-COPY: используем Option<&str>, конвертируем в Option<String> только при необходимости
+        let destination_owner = adapter.get_token_account_owner(destination).map(|s| s.to_string());
         
         // Формируем amount_raw как строку без format! (используем itoa)
         let mut num_buf = itoa::Buffer::new();
@@ -382,7 +386,7 @@ impl TransactionUtils {
         let signer = self.adapter.signer();
         let output_transfer = transfers.iter().find(|t| t.info.mint == output_mint);
         if let Some(output) = output_transfer {
-            if output.info.source == signer || output.info.authority.as_ref().map(|a| a == &signer).unwrap_or(false) {
+            if output.info.source == signer || output.info.authority.as_ref().map(|a| a == signer).unwrap_or(false) {
                 // Меняем местами input и output
                 std::mem::swap(&mut input_mint, &mut output_mint);
             }

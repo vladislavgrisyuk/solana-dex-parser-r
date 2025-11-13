@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 const WSOL: &str = "So11111111111111111111111111111111111111112";
 const SIGNATURE: &str = "4fesiuBKwrBkE9Aaqv1D8ZTeQPL8Tyd7vQfzfiCJKefTbkrsXqkuEnngwAd2q2uaF5579DFtsSGUTrtuyVYMqUh6"; // Замените на нужный хеш транзакции
-const RPC_URL: &str = "https://api.mainnet-beta.solana.com"; // Замените на нужный RPC URL
+const RPC_URL: &str = "https://mainnet.helius-rpc.com/?api-key=d83c5403-fccf-434c-b337-8d1b5b693f49"; // Замените на нужный RPC URL
 
 fn main() -> Result<()> {
     // Initialize tracing subscriber for logging
@@ -113,7 +113,7 @@ fn main() -> Result<()> {
 
     println!("✅ Транзакция получена!");
 
-    // Initialize parser
+    // Initialize parser (один раз)
     let parser = DexParser::new();
     let config = ParseConfig {
         try_unknown_dex: true,
@@ -121,6 +121,41 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
+    // Парсим 300 раз для измерения среднего времени
+    // ВАЖНО: Каждый раз парсинг происходит С НУЛЯ:
+    // - tx.clone() создает полностью новую копию транзакции
+    // - parser.parse_all() внутри создает новый TransactionAdapter::new()
+    // - TransactionAdapter::new() создает новые HashMap для token maps
+    // - InstructionClassifier::new() создает новую классификацию инструкций
+    // - TransactionUtils::new() создает новый экземпляр
+    // - create_transfers_from_instructions() каждый раз парсит инструкции заново
+    // НЕТ кэширования между итерациями в коде!
+    // (Улучшение времени связано только с CPU cache/branch prediction)
+    const ITERATIONS: usize = 300;
+    let mut parse_times = Vec::with_capacity(ITERATIONS);
+    
+    println!("🔄 Запускаю {} итераций парсинга (каждый раз с нуля, без кэша)...", ITERATIONS);
+    
+    for i in 0..ITERATIONS {
+        let t_parse_start = Instant::now();
+        // Каждый вызов создает все структуры заново внутри parse_all
+        let _res = parser.parse_all(tx.clone(), Some(config.clone()));
+        let t_parse_end = Instant::now();
+        parse_times.push(t_parse_end.duration_since(t_parse_start));
+        
+        // Показываем прогресс каждые 50 итераций
+        if (i + 1) % 50 == 0 {
+            let current_avg: Duration = parse_times.iter().sum::<Duration>() / parse_times.len() as u32;
+            println!("   {} итераций: среднее = {:.3}ms", i + 1, ms(current_avg));
+        }
+    }
+    
+    // Вычисляем среднее время парсинга
+    let total_parse_time: Duration = parse_times.iter().sum();
+    let avg_parse_time = total_parse_time / ITERATIONS as u32;
+    let avg_parse_ms = ms(avg_parse_time);
+    
+    // Парсим еще раз для вывода результатов
     let t_parse0 = Instant::now();
     let res = parser.parse_all(tx, Some(config));
     let t_parsed = Instant::now();
@@ -219,6 +254,10 @@ fn main() -> Result<()> {
     println!(
         "⏱️ Timing: Fetch={:.3}ms  Parse={:.3}ms  Print={:.3}ms  TOTAL={:.3}ms",
         fetch_ms, parse_ms, print_ms, total_ms
+    );
+    println!(
+        "📊 Benchmark ({} iterations): Avg Parse={:.3}ms",
+        ITERATIONS, avg_parse_ms
     );
 
     hr();

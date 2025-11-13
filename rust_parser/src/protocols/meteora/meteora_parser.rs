@@ -111,6 +111,7 @@ impl MeteoraParser {
     /// Получает transfers для инструкции
     /// Использует ключ в формате TypeScript: `${programId}:${outerIndex}-${innerIndex}`
     /// Получает transfers для инструкции по ключу (как в TypeScript getTransfersForInstruction)
+    /// ОПТИМИЗИРОВАНО: использует itoa для форматирования ключа
     #[inline]
     fn get_transfers_for_instruction(
         &self,
@@ -120,19 +121,29 @@ impl MeteoraParser {
     ) -> Vec<&TransferData> {
         // В TypeScript: key = `${programId}:${outerIndex}${innerIndex == undefined ? '' : `-${innerIndex}`}`
         // В Rust версии create_transfers_from_instructions создает такие же ключи
-        let key = if let Some(inner) = inner_index {
-            format!("{}:{}-{}", program_id, outer_index, inner)
-        } else {
-            format!("{}:{}", program_id, outer_index)
-        };
+        // ОПТИМИЗАЦИЯ: используем itoa вместо format!
+        let mut key_buf = String::with_capacity(128);
+        key_buf.push_str(program_id);
+        key_buf.push(':');
+        let mut num_buf = itoa::Buffer::new();
+        key_buf.push_str(num_buf.format(outer_index));
+        if let Some(inner) = inner_index {
+            key_buf.push('-');
+            key_buf.push_str(num_buf.format(inner));
+        }
         
         // Ищем transfers по ключу (как в TypeScript)
-        let transfers = self.transfer_actions.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        let transfers = self.transfer_actions.get(&key_buf).map(|v| v.as_slice()).unwrap_or(&[]);
         
         // Фильтруем только transfer и transferChecked (как в TypeScript)
-        transfers.iter()
-            .filter(|t| matches!(t.transfer_type.as_str(), "transfer" | "transferChecked"))
-            .collect()
+        // ОПТИМИЗАЦИЯ: предварительно резервируем capacity
+        let mut result = Vec::with_capacity(transfers.len());
+        for t in transfers {
+            if matches!(t.transfer_type.as_str(), "transfer" | "transferChecked") {
+                result.push(t);
+            }
+        }
+        result
     }
 }
 

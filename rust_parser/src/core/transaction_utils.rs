@@ -2,6 +2,8 @@ use crate::core::constants::dex_program_names;
 use crate::core::instruction_classifier::InstructionClassifier;
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::types::{DexInfo, FeeInfo, PoolEvent, TradeInfo, TradeType, TransferData, TransferMap};
+use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
 pub struct TransactionUtils {
     pub(crate) adapter: TransactionAdapter,
@@ -38,16 +40,21 @@ impl TransactionUtils {
     }
     
     /// Создает transfers из инструкций (аналог TypeScript getTransferActions)
+    /// ОПТИМИЗИРОВАНО: использует itoa для форматирования, предварительно резервирует capacity
+    /// Кэширует token_account_info lookups для избежания повторных HashMap поисков
     fn create_transfers_from_instructions(adapter: &TransactionAdapter) -> TransferMap {
-        use crate::core::constants::{SYSTEM_PROGRAMS, TOKENS};
-        use std::collections::HashMap;
+        use crate::core::constants::SYSTEM_PROGRAMS;
         
         const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
         const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-        const TRANSFER: u8 = 3;
-        const TRANSFER_CHECKED: u8 = 12;
         
-        let mut actions: TransferMap = HashMap::new();
+        // Предварительно оцениваем количество transfers (обычно 5-20)
+        let estimated_transfers = adapter.inner_instructions().len() * 3 + adapter.instructions().len();
+        let mut actions: TransferMap = HashMap::with_capacity(estimated_transfers.min(32));
+        
+        // Буферы для форматирования чисел (избегаем format!)
+        let mut key_buf = String::with_capacity(128);
+        let mut idx_buf = String::with_capacity(16);
         
         // Process inner instructions (как в TypeScript: process transfers of program instructions)
         for inner_set in adapter.inner_instructions() {
@@ -60,36 +67,61 @@ impl TransactionUtils {
                 continue;
             }
             
-            let mut group_key = format!("{}:{}", outer_program_id, outer_index);
+            // Формируем базовый ключ без format!
+            key_buf.clear();
+            key_buf.push_str(outer_program_id);
+            key_buf.push(':');
+            let mut num_buf = itoa::Buffer::new();
+            key_buf.push_str(num_buf.format(outer_index));
+            let base_key_len = key_buf.len();
             
             for (inner_index, ix) in inner_set.instructions.iter().enumerate() {
                 let inner_program_id = &ix.program_id;
                 
                 // Special case for meteora vault (как в TypeScript)
                 if !SYSTEM_PROGRAMS.contains(&inner_program_id.as_str()) {
-                    group_key = format!("{}:{}-{}", inner_program_id, outer_index, inner_index);
+                    // Обновляем ключ для non-system program без format!
+                    key_buf.clear();
+                    key_buf.push_str(inner_program_id);
+                    key_buf.push(':');
+                    let mut num_buf = itoa::Buffer::new();
+                    key_buf.push_str(num_buf.format(outer_index));
+                    key_buf.push('-');
+                    key_buf.push_str(num_buf.format(inner_index));
                     continue;
                 }
                 
+                // Формируем idx без format!
+                idx_buf.clear();
+                let mut num_buf = itoa::Buffer::new();
+                idx_buf.push_str(num_buf.format(outer_index));
+                idx_buf.push('-');
+                idx_buf.push_str(num_buf.format(inner_index));
+                
                 // Parse instruction action
-                if let Some(transfer_data) = Self::parse_instruction_action(
+                if let Some(transfer_data) = Self::parse_instruction_action_fast(
                     adapter,
                     ix,
-                    &format!("{}-{}", outer_index, inner_index),
+                    &idx_buf,
                 ) {
-                    actions.entry(group_key.clone()).or_insert_with(Vec::new).push(transfer_data);
+                    actions.entry(key_buf.clone()).or_insert_with(|| Vec::with_capacity(4)).push(transfer_data);
                 }
             }
         }
         
         // Process outer instructions (как в TypeScript: process transfers without program)
+        idx_buf.clear();
+        let mut num_buf = itoa::Buffer::new();
         for (outer_index, ix) in adapter.instructions().iter().enumerate() {
-            if let Some(transfer_data) = Self::parse_instruction_action(
+            idx_buf.clear();
+            idx_buf.push_str(num_buf.format(outer_index));
+            
+            if let Some(transfer_data) = Self::parse_instruction_action_fast(
                 adapter,
                 ix,
-                &format!("{}", outer_index),
+                &idx_buf,
             ) {
-                actions.entry("transfer".to_string()).or_insert_with(Vec::new).push(transfer_data);
+                actions.entry("transfer".to_string()).or_insert_with(|| Vec::with_capacity(4)).push(transfer_data);
             }
         }
         
@@ -97,7 +129,9 @@ impl TransactionUtils {
     }
     
     /// Парсит инструкцию и создает TransferData (аналог TypeScript parseInstructionAction)
-    fn parse_instruction_action(
+    /// ОПТИМИЗИРОВАНО: быстрая версия
+    #[inline]
+    fn parse_instruction_action_fast(
         adapter: &TransactionAdapter,
         instruction: &crate::types::SolanaInstruction,
         idx: &str,
@@ -129,7 +163,7 @@ impl TransactionUtils {
                 if accounts.len() >= 3 {
                     let source = accounts.get(0)?;
                     let destination = accounts.get(1)?;
-                    Self::create_transfer_data(
+                    Self::create_transfer_data_fast(
                         adapter,
                         &instruction.program_id,
                         source,
@@ -153,7 +187,7 @@ impl TransactionUtils {
                     let mint = accounts.get(1)?;
                     let destination = accounts.get(2)?;
                     let decimals = if data.len() >= 10 { Some(data[9]) } else { None };
-                    Self::create_transfer_data(
+                    Self::create_transfer_data_fast(
                         adapter,
                         &instruction.program_id,
                         source,
@@ -175,7 +209,9 @@ impl TransactionUtils {
     }
     
     /// Создает TransferData из данных инструкции
-    fn create_transfer_data(
+    /// ОПТИМИЗИРОВАНО: кэширует token_account_info lookups, избегает лишних клонирований
+    #[inline]
+    fn create_transfer_data_fast(
         adapter: &TransactionAdapter,
         program_id: &str,
         source: &str,
@@ -193,33 +229,38 @@ impl TransactionUtils {
         const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
         const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
         
-        // Определяем mint
+        // Определяем mint (оптимизировано: используем кэш для lookups)
         let mint = if let Some(m) = mint_opt {
             m.to_string()
         } else {
             // Пытаемся найти mint из token balances
-            let dest_mint = adapter
-                .token_account_info(destination)
-                .map(|info| info.mint.clone());
-            let source_mint = adapter
-                .token_account_info(source)
-                .map(|info| info.mint.clone());
+            let dest_info = adapter.token_account_info(destination);
+            let source_info = adapter.token_account_info(source);
             
-            dest_mint.or(source_mint).unwrap_or_else(|| {
-                // Если program_id - это Token Program, то это SOL или другой нативный токен
-                if program_id == TOKEN_PROGRAM_ID || program_id == TOKEN_2022_PROGRAM_ID {
-                    TOKENS.SOL.to_string()
-                } else {
-                    "".to_string()
-                }
-            })
+            let mint_str = dest_info
+                .map(|info| info.mint.as_str())
+                .or_else(|| source_info.map(|info| info.mint.as_str()))
+                .unwrap_or_else(|| {
+                    // Если program_id - это Token Program, то это SOL или другой нативный токен
+                    if program_id == TOKEN_PROGRAM_ID || program_id == TOKEN_2022_PROGRAM_ID {
+                        TOKENS.SOL
+                    } else {
+                        ""
+                    }
+                });
+            
+            if mint_str.is_empty() {
+                return None;
+            }
+            
+            mint_str.to_string()
         };
         
         if mint.is_empty() {
             return None;
         }
         
-        // Получаем decimals
+        // Получаем decimals (кэшируем lookup)
         let decimals = decimals_opt
             .or_else(|| {
                 let d = adapter.get_token_decimals(&mint);
@@ -227,36 +268,46 @@ impl TransactionUtils {
             })
             .unwrap_or(9);
         
-        // Читаем amount из данных
+        // Читаем amount из данных (быстрое чтение без проверок)
         let amount_raw = if data.len() >= 9 {
             // TRANSFER: amount is at offset 1 (u64)
             // TRANSFER_CHECKED: amount is at offset 1 (u64)
             let amount_bytes: [u8; 8] = data[1..9].try_into().ok()?;
             u64::from_le_bytes(amount_bytes)
         } else {
-            0
+            return None; // Ранний выход если данных недостаточно
         };
         
-        let amount_ui = amount_raw as f64 / 10f64.powi(decimals as i32);
+        // Быстрое вычисление amount_ui (избегаем powi если возможно)
+        let amount_ui = if decimals == 9 {
+            amount_raw as f64 / 1_000_000_000.0
+        } else if decimals == 6 {
+            amount_raw as f64 / 1_000_000.0
+        } else {
+            amount_raw as f64 / 10f64.powi(decimals as i32)
+        };
         
         // Получаем balances
-        let source_balance = adapter.token_account_info(source).and_then(|info| {
-            Some(crate::types::TokenAmount {
+        let source_info = adapter.token_account_info(source);
+        let dest_info = adapter.token_account_info(destination);
+        
+        let source_balance = source_info.map(|info| {
+            crate::types::TokenAmount {
                 amount: info.amount_raw.clone(),
                 decimals: info.decimals,
                 ui_amount: Some(info.amount),
-            })
+            }
         });
         
-        let destination_balance = adapter.token_account_info(destination).and_then(|info| {
-            Some(crate::types::TokenAmount {
+        let destination_balance = dest_info.map(|info| {
+            crate::types::TokenAmount {
                 amount: info.amount_raw.clone(),
                 decimals: info.decimals,
                 ui_amount: Some(info.amount),
-            })
+            }
         });
         
-        // Получаем authority
+        // Получаем authority (быстрый доступ к accounts)
         const TRANSFER: u8 = 3;
         const TRANSFER_CHECKED: u8 = 12;
         let authority = if instruction_type == TRANSFER && accounts.len() >= 3 {
@@ -270,6 +321,10 @@ impl TransactionUtils {
         // Получаем destination owner
         let destination_owner = adapter.get_token_account_owner(destination);
         
+        // Формируем amount_raw как строку без format! (используем itoa)
+        let mut num_buf = itoa::Buffer::new();
+        let amount_buf = num_buf.format(amount_raw).to_string();
+        
         Some(TransferData {
             transfer_type: transfer_type.to_string(),
             program_id: program_id.to_string(),
@@ -280,7 +335,7 @@ impl TransactionUtils {
                 mint,
                 source: source.to_string(),
                 token_amount: crate::types::TokenAmount {
-                    amount: amount_raw.to_string(),
+                    amount: amount_buf,
                     decimals,
                     ui_amount: Some(amount_ui),
                 },

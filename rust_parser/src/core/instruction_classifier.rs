@@ -18,10 +18,9 @@ impl InstructionClassifier {
         #[cfg(debug_assertions)]
         let t0 = std::time::Instant::now();
         
-        // Pre-allocate with estimated capacity
-        let outer_count = adapter.instructions().len();
-        let inner_count_est = adapter.inner_instructions().iter().map(|i| i.instructions.len()).sum::<usize>();
-        let mut instruction_map: HashMap<String, Vec<ClassifiedInstruction>> = HashMap::with_capacity(outer_count / 2);
+               // Pre-allocate with estimated capacity
+               let outer_count = adapter.instructions().len();
+               let mut instruction_map: HashMap<String, Vec<ClassifiedInstruction>> = HashMap::with_capacity(outer_count / 2);
         let mut order: Vec<String> = Vec::with_capacity(outer_count / 2);
         let mut seen: HashSet<String> = HashSet::with_capacity(outer_count / 2);
 
@@ -88,7 +87,7 @@ impl InstructionClassifier {
             tracing::debug!(
                 "⏱️  InstructionClassifier::new: outer={:.3}μs ({}), inner={:.3}μs ({}), total={:.3}μs",
                 (t1 - t0).as_secs_f64() * 1_000_000.0, adapter.instructions().len(),
-                (t2 - t1).as_secs_f64() * 1_000_000.0, inner_count_est,
+                (t2 - t1).as_secs_f64() * 1_000_000.0, inner_count,
                 (t2 - t0).as_secs_f64() * 1_000_000.0,
             );
             tracing::info!(
@@ -119,11 +118,14 @@ impl InstructionClassifier {
     }
 
     /// Все инструкции по одному program_id
+    /// Оптимизация: возвращает клон только при необходимости
     pub fn get_instructions(&self, program_id: &str) -> Vec<ClassifiedInstruction> {
         // Optimized: avoid timing overhead in release builds
         #[cfg(debug_assertions)]
         let start = std::time::Instant::now();
         
+        // Оптимизация: клонируем только если необходимо (это дешевая операция для Vec)
+        // Альтернатива: можно вернуть &[ClassifiedInstruction], но это требует изменения API
         let result = self.instruction_map
             .get(program_id)
             .cloned()

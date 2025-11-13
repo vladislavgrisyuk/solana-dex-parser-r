@@ -23,7 +23,21 @@ use tokio_tungstenite::tungstenite::Message;
 
 
 const API_KEY: &str = "767f42d9-06c2-46f8-8031-9869035d6ce4";
-const ACCOUNT_INCLUDE: &[&str] = &["pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"];
+// Pumpfun и Meteor program IDs для парсинга
+const ACCOUNT_INCLUDE: &[&str] = &[
+    // Pumpfun
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    // Pumpswap
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+    // Meteor DLMM
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    // Meteor DAMM
+    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+    // Meteor DAMM V2
+    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
+    // Meteor DBC
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN",
+];
 const MAX_EVENTS: usize = 50;
 const VERBOSE_JSON: bool = false;
 const WSOL: &str = "So11111111111111111111111111111111111111112";

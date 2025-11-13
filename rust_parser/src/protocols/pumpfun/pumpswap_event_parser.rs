@@ -1,13 +1,12 @@
+use std::sync::Arc;
+
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::types::ClassifiedInstruction;
 
-use super::binary_reader::BinaryReader;
+use super::binary_reader::BinaryReaderRef;
 use super::constants::discriminators::pumpswap_events;
 use super::error::PumpfunError;
 use super::util::{get_instruction_data, sort_by_idx, HasIdx};
-
-use std::time::Instant;
-use tracing::{debug, info};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PumpswapEventType {
@@ -24,9 +23,11 @@ pub struct PumpswapEvent {
     pub data: PumpswapEventData,
     pub slot: u64,
     pub timestamp: u64,
-    pub signature: String,
+    pub signature: Arc<String>,
     pub idx: String,
-    pub signer: Option<Vec<String>>,
+    pub idx_outer: u16,
+    pub idx_inner: u16,
+    pub signer: Option<Arc<Vec<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,215 +156,111 @@ pub struct PumpswapWithdrawEvent {
     pub user_pool_token_account: String,
 }
 
-#[inline]
-fn since_us(t: Instant) -> u128 { t.elapsed().as_micros() }
-
-pub struct PumpswapEventParser {
-    adapter: TransactionAdapter,
-}
+pub struct PumpswapEventParser;
 
 impl PumpswapEventParser {
-    pub fn new(adapter: TransactionAdapter) -> Self {
-        Self { adapter }
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn parse_instructions(
         &self,
+        adapter: &TransactionAdapter,
         instructions: &[ClassifiedInstruction],
     ) -> Result<Vec<PumpswapEvent>, PumpfunError> {
-        let t_all = Instant::now();
-
-        // Профилирование (суммы по циклу):
-        let mut us_alloc_vec = 0;
-        let mut us_adapter_reads = 0;
-        let mut us_loop_total = 0;
-        let mut us_get_instr = 0;
-        let mut us_disc_slice = 0;
-        let mut us_match_disc = 0;
-        let mut us_decode_buy = 0;
-        let mut us_decode_sell = 0;
-        let mut us_decode_create = 0;
-        let mut us_decode_add = 0;
-        let mut us_decode_remove = 0;
-        let mut us_idx_format = 0;
-        let mut us_push = 0;
-
-        let mut cnt_buy = 0u32;
-        let mut cnt_sell = 0u32;
-        let mut cnt_create = 0u32;
-        let mut cnt_add = 0u32;
-        let mut cnt_remove = 0u32;
-
-        // Аллокация вектора под ожидаемое кол-во событий
-        let t = Instant::now();
         let mut events: Vec<PumpswapEvent> = Vec::with_capacity(instructions.len());
-        us_alloc_vec += since_us(t);
-
-        // Один раз читаем из адаптера
-        let t = Instant::now();
-        let slot = self.adapter.slot();
-        let timestamp = self.adapter.block_time();
-        let signature = self.adapter.signature().to_string();
-        let signers = self.adapter.signers().to_vec();
-        us_adapter_reads += since_us(t);
-
-        debug!("PumpswapEventParser: parsing {} instructions", instructions.len());
+        let slot = adapter.slot();
+        let timestamp = adapter.block_time();
+        // ОПТИМИЗАЦИЯ: создаем Arc один раз для всех событий
+        let signature_arc = Arc::new(adapter.signature().to_string());
+        let signers_arc = Arc::new(adapter.signers().to_vec());
 
         for classified in instructions {
-            let t_loop = Instant::now();
-
-            // get_instruction_data
-            let t = Instant::now();
             let data = match get_instruction_data(&classified.data) {
                 Ok(d) => d,
-                Err(e) => {
-                    debug!(
-                        "decode error at {}-{}: {}",
-                        classified.outer_index,
-                        classified.inner_index.unwrap_or(0),
-                        e
-                    );
-                    continue;
-                }
+                Err(_) => continue,
             };
-            us_get_instr += since_us(t);
 
             if data.len() < 16 {
                 continue;
             }
 
-            // slice дискриминатора
-            let t = Instant::now();
-            let disc = &data[..16];
-            us_disc_slice += since_us(t);
-
-            // идентификация типа (без копий payload)
-            let t = Instant::now();
-            let et = if disc == pumpswap_events::CREATE_POOL.as_slice() {
-                Some(PumpswapEventType::Create)
-            } else if disc == pumpswap_events::ADD_LIQUIDITY.as_slice() {
-                Some(PumpswapEventType::Add)
-            } else if disc == pumpswap_events::REMOVE_LIQUIDITY.as_slice() {
-                Some(PumpswapEventType::Remove)
-            } else if disc == pumpswap_events::BUY.as_slice() {
-                info!("✅ Found PUMPSWAP BUY event at {}-{}", classified.outer_index, classified.inner_index.unwrap_or(0));
-                Some(PumpswapEventType::Buy)
-            } else if disc == pumpswap_events::SELL.as_slice() {
-                info!("✅ Found PUMPSWAP SELL event at {}-{}", classified.outer_index, classified.inner_index.unwrap_or(0));
-                Some(PumpswapEventType::Sell)
-            } else {
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    let disc_hex: String = disc.iter().map(|b| format!("{:02x}", b)).collect();
-                    let buy_hex: String = pumpswap_events::BUY.iter().map(|b| format!("{:02x}", b)).collect();
-                    let sell_hex: String = pumpswap_events::SELL.iter().map(|b| format!("{:02x}", b)).collect();
-                    debug!("No match. Expected BUY: {}, SELL: {}, got: {}", buy_hex, sell_hex, disc_hex);
-                }
-                None
+            // ОПТИМИЗАЦИЯ: используем u128 для быстрого сравнения
+            let disc_bytes: [u8; 16] = match data[..16].try_into() {
+                Ok(b) => b,
+                Err(_) => continue,
             };
-            us_match_disc += since_us(t);
+            let disc_u128 = u128::from_le_bytes(disc_bytes);
+            
+            let event_type = match disc_u128 {
+                x if x == pumpswap_events::CREATE_POOL_U128 => Some(PumpswapEventType::Create),
+                x if x == pumpswap_events::ADD_LIQUIDITY_U128 => Some(PumpswapEventType::Add),
+                x if x == pumpswap_events::REMOVE_LIQUIDITY_U128 => Some(PumpswapEventType::Remove),
+                x if x == pumpswap_events::BUY_U128 => Some(PumpswapEventType::Buy),
+                x if x == pumpswap_events::SELL_U128 => Some(PumpswapEventType::Sell),
+                _ => {
+                    // ОПТИМИЗАЦИЯ: логируем только при debug уровне
+                    #[cfg(debug_assertions)]
+                    if tracing::enabled!(tracing::Level::DEBUG) {
+                        tracing::debug!("Unexpected discriminator: {}", hex::encode(&data[..16]));
+                    }
+                    None
+                }
+            };
 
-            if let Some(event_type) = et {
-                // передаём срез без предварительного to_vec
+            if let Some(event_type) = event_type {
+                // ОПТИМИЗАЦИЯ: передаем срез вместо to_vec()
                 let payload = &data[16..];
 
-                // decode по типу с таймингом
-                let t = Instant::now();
                 let data_enum = match event_type {
                     PumpswapEventType::Buy => {
-                        let ev = self.decode_buy_event(payload)?;
-                        us_decode_buy += since_us(t);
-                        cnt_buy += 1;
-                        PumpswapEventData::Buy(ev)
+                        PumpswapEventData::Buy(Self::decode_buy_event(payload)?)
                     }
                     PumpswapEventType::Sell => {
-                        let ev = self.decode_sell_event(payload)?;
-                        us_decode_sell += since_us(t);
-                        cnt_sell += 1;
-                        PumpswapEventData::Sell(ev)
+                        PumpswapEventData::Sell(Self::decode_sell_event(payload)?)
                     }
                     PumpswapEventType::Create => {
-                        let ev = self.decode_create_event(payload)?;
-                        us_decode_create += since_us(t);
-                        cnt_create += 1;
-                        PumpswapEventData::Create(ev)
+                        PumpswapEventData::Create(Self::decode_create_event(payload)?)
                     }
                     PumpswapEventType::Add => {
-                        let ev = self.decode_add_liquidity(payload)?;
-                        us_decode_add += since_us(t);
-                        cnt_add += 1;
-                        PumpswapEventData::Deposit(ev)
+                        PumpswapEventData::Deposit(Self::decode_add_liquidity(payload)?)
                     }
                     PumpswapEventType::Remove => {
-                        let ev = self.decode_remove_liquidity(payload)?;
-                        us_decode_remove += since_us(t);
-                        cnt_remove += 1;
-                        PumpswapEventData::Withdraw(ev)
+                        PumpswapEventData::Withdraw(Self::decode_remove_liquidity(payload)?)
                     }
                 };
 
-                // форматируем idx
-                let t = Instant::now();
-                let idx = format!(
-                    "{}-{}",
-                    classified.outer_index,
-                    classified.inner_index.unwrap_or(0)
-                );
-                us_idx_format += since_us(t);
+                let outer_idx = classified.outer_index as u16;
+                let inner_idx = classified.inner_index.unwrap_or(0) as u16;
+                // ОПТИМИЗАЦИЯ: создаем idx строку только для совместимости, но храним числовые значения
+                let idx = format!("{}-{}", outer_idx, inner_idx);
 
-                // пушим событие
-                let t = Instant::now();
                 events.push(PumpswapEvent {
                     event_type,
                     data: data_enum,
                     slot,
                     timestamp,
-                    signature: signature.clone(),
+                    signature: Arc::clone(&signature_arc),
                     idx,
-                    signer: Some(signers.clone()),
+                    idx_outer: outer_idx,
+                    idx_inner: inner_idx,
+                    signer: Some(Arc::clone(&signers_arc)),
                 });
-                us_push += since_us(t);
             }
-
-            us_loop_total += since_us(t_loop);
         }
 
-        // сортировка
-        let t_sort = Instant::now();
-        let sorted = sort_by_idx(events);
-        let us_sort = since_us(t_sort);
-
-        let us_total = since_us(t_all);
-        debug!(
-            "⏱️  PumpswapEventParser::parse_instructions TOTAL={}μs ({:.3}ms) | alloc_vec={}μs, adapter_reads={}μs, loop={}μs, get_instr={}μs, disc_slice={}μs, match_disc={}μs, idx_fmt={}μs, push={}μs, sort={}μs | decode: buy={}μs({}), sell={}μs({}), create={}μs({}), add={}μs({}), remove={}μs({})",
-            us_total, us_total as f64 / 1000.0,
-            us_alloc_vec,
-            us_adapter_reads,
-            us_loop_total,
-            us_get_instr,
-            us_disc_slice,
-            us_match_disc,
-            us_idx_format,
-            us_push,
-            us_sort,
-            us_decode_buy,   cnt_buy,
-            us_decode_sell,  cnt_sell,
-            us_decode_create,cnt_create,
-            us_decode_add,   cnt_add,
-            us_decode_remove,cnt_remove
-        );
-
-        Ok(sorted)
+        Ok(sort_by_idx(events))
     }
 
     #[inline]
-    fn decode_buy_event(&self, data: &[u8]) -> Result<PumpswapBuyEvent, PumpfunError> {
-        let t_all = Instant::now();
-        // BinaryReader требует владение — создаём один to_vec здесь (единственная копия)
-        let mut reader = BinaryReader::new(data.to_vec());
+    fn decode_buy_event(data: &[u8]) -> Result<PumpswapBuyEvent, PumpfunError> {
+        let mut reader = BinaryReaderRef::new_ref(data);
 
+        // ОПТИМИЗАЦИЯ: inline normalize_timestamp
         let ts = reader.read_i64()?;
+        let timestamp = if ts >= 0 { ts as u64 } else { 0 };
         let ev = PumpswapBuyEvent {
-            timestamp: normalize_timestamp(ts),
+            timestamp,
             base_amount_out: reader.read_u64()?,
             max_quote_amount_in: reader.read_u64()?,
             user_base_token_reserves: reader.read_u64()?,
@@ -399,19 +296,17 @@ impl PumpswapEventParser {
             } else { 0 },
         };
 
-        let us_total = since_us(t_all);
-        debug!("   ↳ decode_buy_event: {}μs ({:.3}ms)", us_total, us_total as f64 / 1000.0);
         Ok(ev)
     }
 
     #[inline]
-    fn decode_sell_event(&self, data: &[u8]) -> Result<PumpswapSellEvent, PumpfunError> {
-        let t_all = Instant::now();
-        let mut reader = BinaryReader::new(data.to_vec());
+    fn decode_sell_event(data: &[u8]) -> Result<PumpswapSellEvent, PumpfunError> {
+        let mut reader = BinaryReaderRef::new_ref(data);
 
         let ts = reader.read_i64()?;
+        let timestamp = if ts >= 0 { ts as u64 } else { 0 };
         let ev = PumpswapSellEvent {
-            timestamp: normalize_timestamp(ts),
+            timestamp,
             base_amount_in: reader.read_u64()?,
             min_quote_amount_out: reader.read_u64()?,
             user_base_token_reserves: reader.read_u64()?,
@@ -446,19 +341,17 @@ impl PumpswapEventParser {
             } else { 0 },
         };
 
-        let us_total = since_us(t_all);
-        debug!("   ↳ decode_sell_event: {}μs ({:.3}ms)", us_total, us_total as f64 / 1000.0);
         Ok(ev)
     }
 
     #[inline]
-    fn decode_add_liquidity(&self, data: &[u8]) -> Result<PumpswapDepositEvent, PumpfunError> {
-        let t_all = Instant::now();
-        let mut reader = BinaryReader::new(data.to_vec());
+    fn decode_add_liquidity(data: &[u8]) -> Result<PumpswapDepositEvent, PumpfunError> {
+        let mut reader = BinaryReaderRef::new_ref(data);
 
         let ts = reader.read_i64()?;
+        let timestamp = if ts >= 0 { ts as u64 } else { 0 };
         let ev = PumpswapDepositEvent {
-            timestamp: normalize_timestamp(ts),
+            timestamp,
             lp_token_amount_out: reader.read_u64()?,
             max_base_amount_in: reader.read_u64()?,
             max_quote_amount_in: reader.read_u64()?,
@@ -476,19 +369,17 @@ impl PumpswapEventParser {
             user_pool_token_account: reader.read_pubkey()?,
         };
 
-        let us_total = since_us(t_all);
-        debug!("   ↳ decode_add_liquidity: {}μs ({:.3}ms)", us_total, us_total as f64 / 1000.0);
         Ok(ev)
     }
 
     #[inline]
-    fn decode_create_event(&self, data: &[u8]) -> Result<PumpswapCreatePoolEvent, PumpfunError> {
-        let t_all = Instant::now();
-        let mut reader = BinaryReader::new(data.to_vec());
+    fn decode_create_event(data: &[u8]) -> Result<PumpswapCreatePoolEvent, PumpfunError> {
+        let mut reader = BinaryReaderRef::new_ref(data);
 
         let ts = reader.read_i64()?;
+        let timestamp = if ts >= 0 { ts as u64 } else { 0 };
         let ev = PumpswapCreatePoolEvent {
-            timestamp: normalize_timestamp(ts),
+            timestamp,
             index: reader.read_u16()?,
             creator: reader.read_pubkey()?,
             base_mint: reader.read_pubkey()?,
@@ -509,19 +400,17 @@ impl PumpswapEventParser {
             user_quote_token_account: reader.read_pubkey()?,
         };
 
-        let us_total = since_us(t_all);
-        debug!("   ↳ decode_create_event: {}μs ({:.3}ms)", us_total, us_total as f64 / 1000.0);
         Ok(ev)
     }
 
     #[inline]
-    fn decode_remove_liquidity(&self, data: &[u8]) -> Result<PumpswapWithdrawEvent, PumpfunError> {
-        let t_all = Instant::now();
-        let mut reader = BinaryReader::new(data.to_vec());
+    fn decode_remove_liquidity(data: &[u8]) -> Result<PumpswapWithdrawEvent, PumpfunError> {
+        let mut reader = BinaryReaderRef::new_ref(data);
 
         let ts = reader.read_i64()?;
+        let timestamp = if ts >= 0 { ts as u64 } else { 0 };
         let ev = PumpswapWithdrawEvent {
-            timestamp: normalize_timestamp(ts),
+            timestamp,
             lp_token_amount_in: reader.read_u64()?,
             min_base_amount_out: reader.read_u64()?,
             min_quote_amount_out: reader.read_u64()?,
@@ -539,8 +428,6 @@ impl PumpswapEventParser {
             user_pool_token_account: reader.read_pubkey()?,
         };
 
-        let us_total = since_us(t_all);
-        debug!("   ↳ decode_remove_liquidity: {}μs ({:.3}ms)", us_total, us_total as f64 / 1000.0);
         Ok(ev)
     }
 }
@@ -548,9 +435,11 @@ impl PumpswapEventParser {
 impl HasIdx for PumpswapEvent {
     #[inline]
     fn idx(&self) -> &str { &self.idx }
+    
+    // ОПТИМИЗАЦИЯ: переопределяем idx_key для использования числовых значений напрямую
+    #[inline]
+    fn idx_key(&self) -> (u32, u32) {
+        (self.idx_outer as u32, self.idx_inner as u32)
+    }
 }
 
-#[inline]
-fn normalize_timestamp(value: i64) -> u64 {
-    if value >= 0 { value as u64 } else { 0 }
-}

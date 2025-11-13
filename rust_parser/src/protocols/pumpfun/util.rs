@@ -1,7 +1,5 @@
 use base64_simd::STANDARD;
 use serde::de::DeserializeOwned;
-use std::time::Instant;
-use tracing::debug;
 
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::types::{DexInfo, FeeInfo, MemeEvent, TokenInfo, TradeInfo, TradeType, TransferMap};
@@ -14,11 +12,6 @@ use super::error::PumpfunError;
 use super::pumpswap_event_parser::{
     PumpswapBuyEvent, PumpswapEvent, PumpswapEventData, PumpswapSellEvent,
 };
-
-#[inline]
-fn since_us(start: Instant) -> u128 {
-    start.elapsed().as_micros()
-}
 
 /// Быстрая конвертация raw amount -> ui_amount через таблицу степеней 10
 #[inline]
@@ -98,22 +91,11 @@ pub fn sort_by_idx<T>(mut items: Vec<T>) -> Vec<T>
 where
     T: HasIdx,
 {
-    let len = items.len();
-    let t_all = Instant::now();
-
     items.sort_by(|a, b| {
         let (a_main, a_sub) = a.idx_key();
         let (b_main, b_sub) = b.idx_key();
         a_main.cmp(&b_main).then_with(|| a_sub.cmp(&b_sub))
     });
-
-    let total_us = since_us(t_all);
-    debug!(
-        "⏱️  util::sort_by_idx: total={}μs (~{:.3}ms), len={}",
-        total_us,
-        total_us as f64 / 1000.0,
-        len
-    );
 
     items
 }
@@ -169,38 +151,18 @@ pub fn get_instruction_data(
 
 /// Более дешевая версия: возвращаем ссылку на предыдущую инструкцию без clone.
 /// Линейный поиск, но без аллокаций.
-/// Есть логирование времени и размера массива.
 pub fn get_prev_instruction_by_index<'a>(
     instructions: &'a [crate::types::ClassifiedInstruction],
     outer_index: usize,
     inner_index: Option<usize>,
 ) -> Option<&'a crate::types::ClassifiedInstruction> {
-    let t_all = Instant::now();
-    let len = instructions.len();
-
     let mut prev: Option<&crate::types::ClassifiedInstruction> = None;
     for instr in instructions {
         if instr.outer_index == outer_index && instr.inner_index == inner_index {
-            let total_us = since_us(t_all);
-            debug!(
-                "⏱️  util::get_prev_instruction_by_index: total={}μs (~{:.3}ms), len={}, found={}",
-                total_us,
-                total_us as f64 / 1000.0,
-                len,
-                prev.is_some()
-            );
             return prev;
         }
         prev = Some(instr);
     }
-
-    let total_us = since_us(t_all);
-    debug!(
-        "⏱️  util::get_prev_instruction_by_index: total={}μs (~{:.3}ms), len={}, found=false",
-        total_us,
-        total_us as f64 / 1000.0,
-        len
-    );
     None
 }
 
@@ -209,12 +171,8 @@ pub fn attach_token_transfers(
     mut trade: TradeInfo,
     transfers: &TransferMap,
 ) -> TradeInfo {
-    let t_all = Instant::now();
-    let mut checked_entries = 0usize;
-
     if let Some(ref program_id) = trade.program_id {
         if let Some(entries) = transfers.get(program_id) {
-            checked_entries = entries.len();
             if let Some(transfer) = entries.iter().find(|entry| {
                 entry.info.mint == trade.input_token.mint
                     && entry.info.token_amount.amount == trade.input_token.amount_raw
@@ -229,14 +187,6 @@ pub fn attach_token_transfers(
     if trade.signer.is_none() {
         trade.signer = Some(adapter.signers().to_vec());
     }
-
-    let total_us = since_us(t_all);
-    debug!(
-        "⏱️  util::attach_token_transfers: total={}μs (~{:.3}ms), checked_entries={}",
-        total_us,
-        total_us as f64 / 1000.0,
-        checked_entries
-    );
 
     trade
 }
@@ -363,15 +313,16 @@ pub fn get_pumpswap_trade_info(
             dex_info
                 .amm
                 .clone()
+                .filter(|a| a != "Unknown DEX")
                 .unwrap_or_else(|| PUMP_SWAP_PROGRAM_NAME.to_string()),
         ),
         amms: None,
         route: Some(dex_info.route.clone().unwrap_or_default()),
         slot: event.slot,
         timestamp: event.timestamp,
-        signature: event.signature.clone(),
+        signature: event.signature.as_ref().clone(),
         idx: event.idx.clone(),
-        signer: event.signer.clone(),
+        signer: event.signer.as_ref().map(|s| s.as_ref().clone()),
     }
 }
 
@@ -383,8 +334,6 @@ pub fn build_pumpswap_buy_trade(
     fee: (&str, u8),
     dex_info: &DexInfo,
 ) -> TradeInfo {
-    let t_all = Instant::now();
-
     let (input_mint, input_decimals) = input;
     let (output_mint, output_decimals) = output;
     let (fee_mint, fee_decimals) = fee;
@@ -423,7 +372,7 @@ pub fn build_pumpswap_buy_trade(
         recipient: None,
     };
 
-    let trade = get_pumpswap_trade_info(
+    get_pumpswap_trade_info(
         event,
         dex_info,
         (
@@ -435,16 +384,7 @@ pub fn build_pumpswap_buy_trade(
         fee_info,
         fees,
         buy.user.clone(),
-    );
-
-    let total_us = since_us(t_all);
-    debug!(
-        "⏱️  util::build_pumpswap_buy_trade: total={}μs (~{:.3}ms)",
-        total_us,
-        total_us as f64 / 1000.0
-    );
-
-    trade
+    )
 }
 
 pub fn build_pumpswap_sell_trade(
@@ -455,8 +395,6 @@ pub fn build_pumpswap_sell_trade(
     fee: (&str, u8),
     dex_info: &DexInfo,
 ) -> TradeInfo {
-    let t_all = Instant::now();
-
     let (input_mint, input_decimals) = input;
     let (output_mint, output_decimals) = output;
     let (fee_mint, fee_decimals) = fee;
@@ -488,14 +426,14 @@ pub fn build_pumpswap_sell_trade(
     let fee_info = FeeInfo {
         mint: fee_mint.to_string(),
         amount: convert_to_ui_amount(total_fee, fee_decimals),
-        amount_raw: sell.protocol_fee.to_string(), // оставил как было
+        amount_raw: total_fee.to_string(),
         decimals: fee_decimals,
-        dex: Some(PUMP_SWAP_PROGRAM_NAME.to_string()),
+        dex: None,
         fee_type: None,
         recipient: None,
     };
 
-    let trade = get_pumpswap_trade_info(
+    get_pumpswap_trade_info(
         event,
         dex_info,
         (input_mint, input_decimals, sell.base_amount_in as u128),
@@ -507,16 +445,7 @@ pub fn build_pumpswap_sell_trade(
         fee_info,
         fees,
         sell.user.clone(),
-    );
-
-    let total_us = since_us(t_all);
-    debug!(
-        "⏱️  util::build_pumpswap_sell_trade: total={}μs (~{:.3}ms)",
-        total_us,
-        total_us as f64 / 1000.0
-    );
-
-    trade
+    )
 }
 
 #[inline]

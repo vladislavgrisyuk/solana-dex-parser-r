@@ -5,6 +5,9 @@ pub mod dex_programs {
     pub const PUMP_SWAP: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
     pub const ORCA: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
     pub const METEORA: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
+    pub const METEORA_DAMM: &str = "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB";
+    pub const METEORA_DAMM_V2: &str = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
+    pub const METEORA_DBC: &str = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
     pub const UNKNOWN: &str = "UNKNOWN";
 }
 
@@ -20,7 +23,10 @@ pub mod dex_program_names {
         map.insert(dex_programs::PUMP_FUN, "Pumpfun");
         map.insert(dex_programs::PUMP_SWAP, "Pumpswap");
         map.insert(dex_programs::ORCA, "Orca");
-        map.insert(dex_programs::METEORA, "Meteora");
+        map.insert(dex_programs::METEORA, "MeteoraDLMM");
+        map.insert(dex_programs::METEORA_DAMM, "MeteoraDamm");
+        map.insert(dex_programs::METEORA_DAMM_V2, "MeteoraDammV2");
+        map.insert(dex_programs::METEORA_DBC, "MeteoraDBC");
         map
     });
 

@@ -30,21 +30,8 @@ pub struct TransactionAdapter {
 
 impl TransactionAdapter {
     pub fn new(tx: SolanaTransaction, config: ParseConfig) -> Self {
-        let t0 = std::time::Instant::now();
         let account_keys = Self::extract_account_keys(&tx);
-        let t1 = std::time::Instant::now();
-        let account_keys_time = (t1 - t0).as_secs_f64() * 1000.0;
-        
-        let t2 = std::time::Instant::now();
         let (spl_token_map, spl_decimals_map) = Self::extract_token_maps(&tx);
-        let t3 = std::time::Instant::now();
-        let token_maps_time = (t3 - t2).as_secs_f64() * 1000.0;
-        
-        let total_time = (t3 - t0).as_secs_f64() * 1000.0;
-        tracing::info!(
-            "⏱️  TransactionAdapter::new: extract_account_keys={:.3}ms, extract_token_maps={:.3}ms, total={:.3}ms",
-            account_keys_time, token_maps_time, total_time
-        );
 
         Self {
             tx,
@@ -107,30 +94,22 @@ impl TransactionAdapter {
 
     /// Собираем уникальные адреса только из instructions/inner_instructions + signers
     fn extract_account_keys(tx: &SolanaTransaction) -> Vec<String> {
-        let t0 = std::time::Instant::now();
         // Pre-allocate with estimated capacity
         let estimated_capacity = tx.signers.len() 
             + tx.instructions.len() * 3  // program_id + ~2 accounts per instruction
             + tx.inner_instructions.iter().map(|i| i.instructions.len() * 3).sum::<usize>();
         let mut set: HashSet<String> = HashSet::with_capacity(estimated_capacity);
-        let t1 = std::time::Instant::now();
-
-        let t2 = std::time::Instant::now();
         for s in &tx.signers {
             set.insert(s.clone());
         }
-        let t3 = std::time::Instant::now();
 
-        let t4 = std::time::Instant::now();
         for ix in &tx.instructions {
             set.insert(ix.program_id.clone());
             for a in &ix.accounts {
                 set.insert(a.clone());
             }
         }
-        let t5 = std::time::Instant::now();
 
-        let t6 = std::time::Instant::now();
         for set_inner in &tx.inner_instructions {
             for ix in &set_inner.instructions {
                 set.insert(ix.program_id.clone());
@@ -139,29 +118,13 @@ impl TransactionAdapter {
                 }
             }
         }
-        let t7 = std::time::Instant::now();
 
-        let t8 = std::time::Instant::now();
-        let mut out: Vec<String> = set.into_iter().collect();
-        out.sort();
-        let t9 = std::time::Instant::now();
-
-        let alloc_time = (t1 - t0).as_secs_f64() * 1000.0;
-        let signers_time = (t3 - t2).as_secs_f64() * 1000.0;
-        let outer_time = (t5 - t4).as_secs_f64() * 1000.0;
-        let inner_time = (t7 - t6).as_secs_f64() * 1000.0;
-        let sort_time = (t9 - t8).as_secs_f64() * 1000.0;
-        let total_time = (t9 - t0).as_secs_f64() * 1000.0;
-        
-        tracing::info!(
-            "⏱️  extract_account_keys: alloc={:.3}ms, signers={:.3}ms ({}), outer={:.3}ms ({}), inner={:.3}ms ({}), sort={:.3}ms, total={:.3}ms",
-            alloc_time,
-            signers_time, tx.signers.len(),
-            outer_time, tx.instructions.len(),
-            inner_time, tx.inner_instructions.iter().map(|i| i.instructions.len()).sum::<usize>(),
-            sort_time,
-            total_time
-        );
+        // Оптимизация: предварительно резервируем capacity для Vec
+        let set_size = set.len();
+        let mut out = Vec::with_capacity(set_size);
+        out.extend(set.into_iter());
+        // Оптимизация: используем unstable sort для немного большей скорости
+        out.sort_unstable();
 
         out
     }
@@ -261,6 +224,7 @@ impl TransactionAdapter {
         &self.tx.post_token_balances
     }
 
+
     /// Владелец токен-аккаунта по post/pre token balances
     pub fn get_token_account_owner(&self, account_key: &str) -> Option<String> {
         if let Some(b) = self.post_token_balances().iter().find(|b| b.account == account_key) {
@@ -345,18 +309,134 @@ impl TransactionAdapter {
         TOKENS.values().iter().any(|m| *m == mint)
     }
 
-    /// Get SOL balance change for the signer account
+    /// Get SOL balance change for the signer account (optimized: direct lookup)
     pub fn signer_sol_balance_change(&self) -> Option<BalanceChange> {
         let signer = self.signer();
-        let changes = self.get_account_sol_balance_changes(false);
-        changes.get(&signer).cloned()
+        if signer.is_empty() {
+            return None;
+        }
+        // Оптимизация: прямой доступ к балансу signer без итерации по всем аккаунтам
+        self.tx.meta.sol_balance_changes.get(&signer).cloned()
     }
 
-    /// Get token balance changes for the signer account
+    /// Get token balance changes for the signer account (optimized: only process signer balances)
+    /// Минимум аллокаций: предварительно резервируем capacity, избегаем лишних клонов
     pub fn signer_token_balance_changes(&self) -> Option<HashMap<String, BalanceChange>> {
         let signer = self.signer();
-        let changes = self.get_account_token_balance_changes(false);
-        changes.get(&signer).cloned()
+        if signer.is_empty() {
+            return None;
+        }
+        
+        // Оптимизация: предварительно оцениваем размер для минимизации реаллокаций
+        let pre_balances = self.pre_token_balances();
+        let post_balances = self.post_token_balances();
+        let estimated_capacity = (pre_balances.len().max(post_balances.len()) / 4).max(4);
+        
+        let mut changes = HashMap::with_capacity(estimated_capacity);
+        
+        // Оптимизация: создаем карту pre-balances ТОЛЬКО для signer (фильтруем сразу)
+        // Используем with_capacity для минимизации реаллокаций
+        let mut pre_map: HashMap<String, i128> = HashMap::with_capacity(estimated_capacity);
+        for b in pre_balances {
+            // Проверяем owner сразу, без дополнительных вызовов
+            if let Some(owner) = &b.owner {
+                if owner == &signer && !b.mint.is_empty() {
+                    // Оптимизация: используем parse::<i128> напрямую, избегаем unwrap_or когда возможно
+                    if let Ok(raw) = b.ui_token_amount.amount.parse::<i128>() {
+                        pre_map.insert(b.mint.clone(), raw);
+                    }
+                }
+            }
+        }
+        
+        // Оптимизация: обрабатываем post-balances ТОЛЬКО для signer
+        for b in post_balances {
+            if let Some(owner) = &b.owner {
+                if owner == &signer && !b.mint.is_empty() {
+                    if let Ok(post_raw) = b.ui_token_amount.amount.parse::<i128>() {
+                        let mint_clone = b.mint.clone();
+                        let pre_raw = pre_map.remove(&mint_clone).unwrap_or(0);
+                        let diff = post_raw - pre_raw;
+                        
+                        if diff != 0 {
+                            // Оптимизация: используем remove вместо get для очистки pre_map
+                            changes.insert(mint_clone, BalanceChange {
+                                pre: pre_raw,
+                                post: post_raw,
+                                change: diff,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Проверяем закрытые аккаунты (есть в pre, но нет в post)
+        // Оптимизация: используем into_iter для перемещения вместо клонирования
+        for (mint, pre_raw) in pre_map {
+            if pre_raw != 0 {
+                // Аккаунт был закрыт - баланс стал 0
+                changes.insert(mint, BalanceChange {
+                    pre: pre_raw,
+                    post: 0,
+                    change: -pre_raw,
+                });
+            }
+        }
+        
+        if changes.is_empty() {
+            None
+        } else {
+            Some(changes)
+        }
+    }
+    
+    /// Создает кэшированные карты балансов для быстрого доступа
+    /// Оптимизация: возвращает ссылки на существующие данные, минимум аллокаций
+    /// Возвращает (post_map, pre_map, transfer_map) где ключ - account address
+    pub fn cached_balance_maps(&self) -> (
+        HashMap<&str, &TokenBalance>, 
+        HashMap<&str, &TokenBalance>,
+        HashMap<&str, &TransferData>
+    ) {
+        let post_balances = self.post_token_balances();
+        let pre_balances = self.pre_token_balances();
+        let transfers = self.transfers();
+        
+        // Оптимизация: предварительно резервируем capacity для минимизации реаллокаций
+        let post_capacity = post_balances.len();
+        let pre_capacity = pre_balances.len();
+        let transfer_capacity = transfers.len() * 2; // source + destination
+        
+        let mut post_map = HashMap::with_capacity(post_capacity);
+        let mut pre_map = HashMap::with_capacity(pre_capacity);
+        let mut transfer_map = HashMap::with_capacity(transfer_capacity);
+        
+        // Оптимизация: используем ссылки на строки из TokenBalance, избегаем клонов
+        for b in post_balances {
+            post_map.insert(b.account.as_str(), b);
+        }
+        
+        for b in pre_balances {
+            pre_map.insert(b.account.as_str(), b);
+        }
+        
+        // Оптимизация: создаем карту трансферов по source и destination
+        for t in transfers {
+            transfer_map.insert(t.info.source.as_str(), t);
+            transfer_map.insert(t.info.destination.as_str(), t);
+        }
+        
+        (post_map, pre_map, transfer_map)
+    }
+    
+    /// Получает все изменения балансов для signer (SOL + токены) одним вызовом
+    /// Оптимизация: объединенный вызов для минимизации overhead
+    pub fn signer_all_balance_changes(&self) -> (Option<BalanceChange>, Option<HashMap<String, BalanceChange>>) {
+        (
+            self.signer_sol_balance_change(),
+            self.signer_token_balance_changes(),
+        )
     }
 
     /// База события пула (аналог TS getPoolEventBase)
@@ -377,8 +457,11 @@ impl TransactionAdapter {
     /* ----------------------- balance changes: i128 ----------------------- */
 
     /// Полный аналог по смыслу, но под твой `BalanceChange` (pre/post/change: i128)
+    /// Оптимизация: предварительно резервируем capacity для минимизации реаллокаций
     pub fn get_account_sol_balance_changes(&self, is_owner: bool) -> HashMap<String, BalanceChange> {
-        let mut out = HashMap::new();
+        // Оптимизация: оцениваем размер на основе количества аккаунтов с изменениями
+        let estimated_size = self.account_keys.len().min(self.tx.meta.sol_balance_changes.len());
+        let mut out = HashMap::with_capacity(estimated_size);
 
         for key in &self.account_keys {
             let account_key = if is_owner {
@@ -398,44 +481,55 @@ impl TransactionAdapter {
 
     pub fn get_account_token_balance_changes(&self, is_owner: bool) -> HashMap<String, HashMap<String, BalanceChange>> {
         // outer: account -> (mint -> BalanceChange{i128})
-        let mut out: HashMap<String, HashMap<String, BalanceChange>> = HashMap::new();
+        let pre_balances = self.pre_token_balances();
+        let post_balances = self.post_token_balances();
+        
+        // Оптимизация: предварительно оцениваем размеры для минимизации реаллокаций
+        let estimated_accounts = (pre_balances.len().max(post_balances.len()) / 2).max(4);
+        let mut out: HashMap<String, HashMap<String, BalanceChange>> = HashMap::with_capacity(estimated_accounts);
 
-        // подготовим словарь pre по (account,mint) -> raw
-        let mut pre_map: HashMap<(String, String), i128> = HashMap::new();
-        for b in self.pre_token_balances() {
+        // Оптимизация: подготовим словарь pre по (account,mint) -> raw с предварительным capacity
+        let pre_capacity = pre_balances.len();
+        let mut pre_map: HashMap<(String, String), i128> = HashMap::with_capacity(pre_capacity);
+        for b in pre_balances {
+            if b.mint.is_empty() {
+                continue;
+            }
             let account = if is_owner {
                 self.get_token_account_owner(&b.account).unwrap_or_else(|| b.account.clone())
             } else {
                 b.account.clone()
             };
+            // Оптимизация: используем parse::<i128> напрямую, избегаем unwrap_or когда возможно
+            if let Ok(raw) = b.ui_token_amount.amount.parse::<i128>() {
+                pre_map.insert((account, b.mint.clone()), raw);
+            }
+        }
+
+        // Оптимизация: post: обновим/посчитаем diff, используем remove для очистки pre_map
+        let post_capacity = post_balances.len();
+        let mut tmp: HashMap<(String, String), (i128, i128)> = HashMap::with_capacity(post_capacity); // (pre, post)
+        for b in post_balances {
             if b.mint.is_empty() {
                 continue;
             }
-            let raw = b.ui_token_amount.amount.parse::<i128>().unwrap_or(0);
-            pre_map.insert((account, b.mint.clone()), raw);
-        }
-
-        // post: обновим/посчитаем diff
-        let mut tmp: HashMap<(String, String), (i128, i128)> = HashMap::new(); // (pre, post)
-        for b in self.post_token_balances() {
             let account = if is_owner {
                 self.get_token_account_owner(&b.account).unwrap_or_else(|| b.account.clone())
             } else {
                 b.account.clone()
             };
-            if b.mint.is_empty() {
-                continue;
+            if let Ok(post_raw) = b.ui_token_amount.amount.parse::<i128>() {
+                let mint_clone = b.mint.clone();
+                let pre_raw = pre_map.remove(&(account.clone(), mint_clone.clone())).unwrap_or(0);
+                tmp.insert((account, mint_clone), (pre_raw, post_raw));
             }
-            let post_raw = b.ui_token_amount.amount.parse::<i128>().unwrap_or(0);
-            let pre_raw = *pre_map.get(&(account.clone(), b.mint.clone())).unwrap_or(&0);
-            tmp.insert((account, b.mint.clone()), (pre_raw, post_raw));
         }
 
-        // соберём в нужную иерархию
+        // Оптимизация: соберём в нужную иерархию, используем into_iter для перемещения
         for ((account, mint), (pre_raw, post_raw)) in tmp {
             let diff = post_raw - pre_raw;
             if diff == 0 { continue; }
-            out.entry(account).or_default().insert(
+            out.entry(account).or_insert_with(|| HashMap::with_capacity(4)).insert(
                 mint,
                 BalanceChange { pre: pre_raw, post: post_raw, change: diff },
             );
@@ -452,25 +546,17 @@ impl TransactionAdapter {
     }
 
     /// Сгруппировать трансферы по program_id
+    /// Оптимизация: предварительно резервируем capacity для минимизации реаллокаций
     pub fn get_transfer_actions(&self) -> TransferMap {
-        let start = std::time::Instant::now();
-        let mut map: TransferMap = HashMap::new();
+        let transfers = &self.tx.transfers;
         
-        let t0 = std::time::Instant::now();
-        for t in &self.tx.transfers {
-            map.entry(t.program_id.clone()).or_default().push(t.clone());
+        // Оптимизация: оцениваем количество уникальных program_id (обычно 1-3)
+        let estimated_programs = transfers.len().min(8);
+        let mut map: TransferMap = HashMap::with_capacity(estimated_programs);
+        
+        for t in transfers {
+            map.entry(t.program_id.clone()).or_insert_with(|| Vec::with_capacity(4)).push(t.clone());
         }
-        let t1 = std::time::Instant::now();
-        
-        let transfer_count: usize = map.values().map(|v| v.len()).sum();
-        let duration = start.elapsed();
-        tracing::debug!(
-            "⏱️  get_transfer_actions: grouping={:.3}μs, total={:.3}μs, programs={}, total_transfers={}",
-            (t1 - t0).as_secs_f64() * 1_000_000.0,
-            duration.as_secs_f64() * 1_000_000.0,
-            map.len(),
-            transfer_count
-        );
         
         map
     }
@@ -486,7 +572,6 @@ impl TransactionAdapter {
         let mut accounts: HashMap<String, TokenInfo> = HashMap::with_capacity(estimated_capacity);
         let mut decimals: HashMap<String, u8> = HashMap::with_capacity(estimated_capacity / 2);
 
-        let t0 = std::time::Instant::now();
         // 1) transfers
         for transfer in &tx.transfers {
             let info = &transfer.info;
@@ -516,7 +601,6 @@ impl TransactionAdapter {
             accounts.entry(info.destination.clone()).or_insert_with(|| token_info.clone());
             decimals.entry(info.mint.clone()).or_insert(info.token_amount.decimals);
         }
-        let t1 = std::time::Instant::now();
 
         // 2) post balances (as in TypeScript: extractTokenBalances)
         for b in &tx.post_token_balances {
@@ -530,7 +614,6 @@ impl TransactionAdapter {
                 decimals.entry(b.mint.clone()).or_insert(b.ui_token_amount.decimals);
             }
         }
-        let t2 = std::time::Instant::now();
 
         // 3) pre balances
         for b in &tx.pre_token_balances {
@@ -542,11 +625,9 @@ impl TransactionAdapter {
                 decimals.entry(b.mint.clone()).or_insert(b.ui_token_amount.decimals);
             }
         }
-        let t3 = std::time::Instant::now();
 
         // 4) Extract from instructions (as in TypeScript: extractTokenFromInstructions)
         Self::extract_token_from_instructions(tx, &mut accounts, &mut decimals);
-        let t4 = std::time::Instant::now();
 
         // 5) гарантируем наличие SOL
         accounts.entry(TOKENS.SOL.to_string()).or_insert(TokenInfo {
@@ -557,25 +638,6 @@ impl TransactionAdapter {
             ..TokenInfo::default()
         });
         decimals.entry(TOKENS.SOL.to_string()).or_insert(9);
-        let t5 = std::time::Instant::now();
-        
-        let transfers_time = (t1 - t0).as_secs_f64() * 1000.0;
-        let post_balances_time = (t2 - t1).as_secs_f64() * 1000.0;
-        let pre_balances_time = (t3 - t2).as_secs_f64() * 1000.0;
-        let instructions_time = (t4 - t3).as_secs_f64() * 1000.0;
-        let sol_time = (t5 - t4).as_secs_f64() * 1000.0;
-        let total_time = (t5 - t0).as_secs_f64() * 1000.0;
-        let total_instructions = tx.instructions.len() + tx.inner_instructions.iter().map(|i| i.instructions.len()).sum::<usize>();
-        
-        tracing::info!(
-            "⏱️  extract_token_maps: transfers={:.3}ms ({}), post_balances={:.3}ms ({}), pre_balances={:.3}ms ({}), instructions={:.3}ms ({}), sol={:.3}ms, total={:.3}ms",
-            transfers_time, tx.transfers.len(),
-            post_balances_time, tx.post_token_balances.len(),
-            pre_balances_time, tx.pre_token_balances.len(),
-            instructions_time, total_instructions,
-            sol_time,
-            total_time,
-        );
 
         (accounts, decimals)
     }
@@ -586,7 +648,6 @@ impl TransactionAdapter {
         accounts: &mut HashMap<String, TokenInfo>,
         decimals: &mut HashMap<String, u8>,
     ) {
-        let t0 = std::time::Instant::now();
         const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
         const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
         
@@ -674,8 +735,6 @@ impl TransactionAdapter {
             }
         };
 
-        let t1 = std::time::Instant::now();
-        let mut outer_processed = 0;
         // Process outer instructions
         for ix in &tx.instructions {
             if ix.program_id != TOKEN_PROGRAM_ID && ix.program_id != TOKEN_2022_PROGRAM_ID {
@@ -687,7 +746,6 @@ impl TransactionAdapter {
                 continue;
             }
 
-            outer_processed += 1;
             let instruction_type = data[0];
             let accounts_vec = &ix.accounts;
 
@@ -798,8 +856,6 @@ impl TransactionAdapter {
             }
         }
 
-        let t2 = std::time::Instant::now();
-        let mut inner_processed = 0;
         // Process inner instructions
         for inner in &tx.inner_instructions {
             for ix in &inner.instructions {
@@ -812,7 +868,6 @@ impl TransactionAdapter {
                     continue;
                 }
 
-                inner_processed += 1;
                 let instruction_type = data[0];
                 let accounts_vec = &ix.accounts;
 
@@ -922,18 +977,6 @@ impl TransactionAdapter {
                 }
             }
         }
-        let t3 = std::time::Instant::now();
-        
-        let outer_time = (t2 - t1).as_secs_f64() * 1000.0;
-        let inner_time = (t3 - t2).as_secs_f64() * 1000.0;
-        let total_time = (t3 - t0).as_secs_f64() * 1000.0;
-        
-        tracing::info!(
-            "⏱️  extract_token_from_instructions: outer={:.3}ms ({} processed), inner={:.3}ms ({} processed), total={:.3}ms",
-            outer_time, outer_processed,
-            inner_time, inner_processed,
-            total_time
-        );
     }
 
     fn token_info_from_balance(b: &TokenBalance) -> TokenInfo {

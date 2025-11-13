@@ -7,10 +7,6 @@ use crate::core::error::ParserError;
 use crate::core::instruction_classifier::InstructionClassifier;
 use crate::core::transaction_adapter::TransactionAdapter;
 use crate::core::transaction_utils::TransactionUtils;
-use crate::protocols::meteora::{
-    build_meteora_damm_v2_liquidity_parser, build_meteora_dbc_meme_parser, build_meteora_dbc_trade_parser,
-    build_meteora_dlmm_liquidity_parser, build_meteora_pools_liquidity_parser, build_meteora_trade_parser,
-};
 use crate::protocols::pumpfun::{
     build_pumpfun_meme_parser, build_pumpfun_trade_parser, build_pumpswap_liquidity_parser,
     build_pumpswap_trade_parser, build_pumpswap_transfer_parser,
@@ -90,6 +86,7 @@ impl DexParser {
             dex_programs::JUPITER,
             dex_programs::RAYDIUM,
             dex_programs::ORCA,
+            dex_programs::METEORA,
         ];
 
         for program in default_programs {
@@ -98,34 +95,6 @@ impl DexParser {
             transfer_parsers.insert(program.to_string(), SimpleTransferParser::boxed);
             meme_parsers.insert(program.to_string(), SimpleMemeParser::boxed);
         }
-
-        // Meteor parsers
-        trade_parsers.insert(
-            dex_programs::METEORA.to_string(),
-            build_meteora_trade_parser,
-        );
-        trade_parsers.insert(
-            dex_programs::METEORA_DBC.to_string(),
-            build_meteora_dbc_trade_parser,
-        );
-        
-        liquidity_parsers.insert(
-            dex_programs::METEORA.to_string(),
-            build_meteora_dlmm_liquidity_parser,
-        );
-        liquidity_parsers.insert(
-            dex_programs::METEORA_DAMM.to_string(),
-            build_meteora_pools_liquidity_parser,
-        );
-        liquidity_parsers.insert(
-            dex_programs::METEORA_DAMM_V2.to_string(),
-            build_meteora_damm_v2_liquidity_parser,
-        );
-        
-        meme_parsers.insert(
-            dex_programs::METEORA_DBC.to_string(),
-            build_meteora_dbc_meme_parser,
-        );
 
         trade_parsers.insert(
             dex_programs::PUMP_FUN.to_string(),
@@ -191,7 +160,7 @@ impl DexParser {
                 return Ok(result);
             }
         }
-        
+
         if parse_type.includes_trades() {
             for program_id in &all_program_ids {
                 if let Some(filter) = config.program_ids.as_ref() {
@@ -204,7 +173,7 @@ impl DexParser {
                         continue;
                     }
                 }
-                
+
                 if let Some(builder) = self.trade_parsers.get(program_id) {
                     let program_id_str = program_id.as_str();
                     let amm_name = dex_info.amm.as_deref()
@@ -264,7 +233,7 @@ impl DexParser {
                         continue;
                     }
                 }
-                
+
                 if let Some(builder) = self.liquidity_parsers.get(program_id) {
                     let adapter_clone = utils.adapter.clone();
                     let transfer_clone = transfer_actions.clone();
@@ -294,7 +263,7 @@ impl DexParser {
                         continue;
                     }
                 }
-                
+
                 if let Some(builder) = self.meme_parsers.get(program_id) {
                     let mut parser = builder(utils.adapter.clone(), transfer_actions.clone());
                     let events = parser.process_events();
@@ -310,7 +279,7 @@ impl DexParser {
             if let Some(program_id) = dex_info.program_id.clone() {
                 if let Some(builder) = self.transfer_parsers.get(&program_id) {
                     let classified_instructions = classifier.get_instructions(&program_id);
-                    let program_info = DexInfo {
+                    let mut program_info = DexInfo {
                         program_id: dex_info.program_id.clone(),
                         amm: dex_info.amm.clone(),
                         route: None,
@@ -325,13 +294,13 @@ impl DexParser {
                     result.transfers.extend(transfers);
                 }
             }
-            
+
             if result.transfers.is_empty() {
                 let fallback_transfers: Vec<_> = transfer_actions.values().flatten().cloned().collect();
                 result.transfers.extend(fallback_transfers);
             }
         }
-        
+
         if !result.trades.is_empty() {
             let before_dedup = result.trades.len();
             let mut seen: HashSet<(String, String)> = HashSet::with_capacity(before_dedup);
